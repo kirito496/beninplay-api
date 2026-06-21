@@ -1,0 +1,36 @@
+﻿'use strict';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const requiredEnvVars = ['JWT_SECRET', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const missingEnvVars = requiredEnvVars.filter((v) => !process.env[v]);
+if (missingEnvVars.length > 0) { console.error(`[Server] Variables manquantes: ${missingEnvVars.join(', ')}`); process.exit(1); }
+const authRoutes = require('./routes/auth');
+const videosRoutes = require('./routes/videos');
+const walletRoutes = require('./routes/wallet');
+const chatRoutes = require('./routes/chat');
+const { initWebSocketServer } = require('./websocket/chat');
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.get('/', (_req, res) => res.json({ name: 'BeninPlay API', version: '1.0.0', status: 'en ligne' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.use('/api/auth', authRoutes);
+app.use('/api/videos', videosRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/chat', chatRoutes);
+app.use((_req, res) => res.status(404).json({ success: false, message: 'Route introuvable' }));
+app.use((err, _req, res, _next) => {
+  if (err.type === 'entity.too.large') return res.status(413).json({ success: false, message: 'Requête trop volumineuse' });
+  return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+});
+const server = http.createServer(app);
+initWebSocketServer(server);
+server.listen(PORT, () => console.log(`BeninPlay API démarrée sur le port ${PORT}`));
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGINT', () => server.close(() => process.exit(0)));
+process.on('uncaughtException', (err) => { console.error(err.message); process.exit(1); });
+module.exports = { app, server };
