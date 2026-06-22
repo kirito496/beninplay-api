@@ -1,5 +1,7 @@
 'use strict';
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
+global.WebSocket = ws;
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error('SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY requis');
@@ -8,16 +10,12 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: { autoRefreshToken: false, persistSession: false },
-    realtime: { enabled: false },
-  }
+  { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { realtime: { enabled: false } }
+  process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 module.exports = { supabase, supabaseAdmin };
