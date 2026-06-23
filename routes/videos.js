@@ -6,6 +6,29 @@ const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 }, fileFilter(req, file, cb) { const ok = ['video/mp4','video/quicktime','video/x-msvideo','video/webm','video/3gpp']; ok.includes(file.mimetype) ? cb(null,true) : cb(new Error('Format non supporté')); } });
+
+router.post('/register', requireAuth, async (req, res) => {
+  try {
+    const { title, video_url, description, zone, tags } = req.body;
+    if (!title || !video_url) return res.status(400).json({ success: false, message: 'Titre et URL requis' });
+    const { data, error } = await supabaseAdmin
+      .from('videos')
+      .insert({
+        creator_id: req.user.userId,
+        title,
+        video_url,
+        description: description || '',
+        zone: zone || 'normal',
+        tags: Array.isArray(tags) ? tags : (tags ? tags.split(',') : []),
+      })
+      .select()
+      .single();
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    res.json({ success: true, video: data });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
 router.post('/upload', requireAuth, upload.single('video'), async (req, res) => {
   try {
     if (!req.user.is_creator) return res.status(403).json({ success: false, message: 'Créateurs uniquement' });
