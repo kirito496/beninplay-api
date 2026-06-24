@@ -1,8 +1,5 @@
 'use strict';
 
-const ws = require('ws');
-global.WebSocket = ws;
-
 const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
