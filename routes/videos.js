@@ -119,4 +119,28 @@ router.delete('/:id', requireAuth, async (req, res) => {
     return res.json({ success: true, message: 'Vidéo supprimée' });
   } catch { return res.status(500).json({ success: false, message: 'Erreur interne' }); }
 });
+
+router.post('/register', requireAuth, async (req, res) => {
+  try {
+    const { title, video_url, description, zone, tags } = req.body;
+    if (!title || !video_url) return res.status(400).json({ success: false, message: 'Titre et URL requis' });
+    let parsedTags = [];
+    if (tags) {
+      parsedTags = (Array.isArray(tags) ? tags : tags.split(','))
+        .map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0).slice(0, 10);
+    }
+    const { data: video, error } = await supabaseAdmin.from('videos').insert({
+      id: uuidv4(), creator_id: req.user.id,
+      title: title.trim().slice(0, 150),
+      description: description?.trim() || null,
+      video_url, zone: zone || 'normal', tags: parsedTags,
+      status: 'published', views: 0, likes_count: 0, comments_count: 0, shares_count: 0,
+      created_at: new Date().toISOString(),
+    }).select().single();
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    return res.status(201).json({ success: true, video });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 module.exports = router;

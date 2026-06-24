@@ -1,4 +1,9 @@
 'use strict';
+
+// Node.js 20+ WebSocket fix
+const ws = require('ws');
+global.WebSocket = ws;
+
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 global.WebSocket = ws;
