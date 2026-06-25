@@ -4,10 +4,18 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
-const { normalizeBeninPhone } = require('../services/sms');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
+
+function normalizeBeninPhone(phone) {
+  let cleaned = (phone || '').replace(/[\s\-]/g, '');
+  if (/^\+229\d{8}$/.test(cleaned)) return cleaned;
+  if (/^229\d{8}$/.test(cleaned)) return `+${cleaned}`;
+  if (/^0\d{8}$/.test(cleaned)) return `+229${cleaned.slice(1)}`;
+  if (/^\d{8}$/.test(cleaned)) return `+229${cleaned}`;
+  return null;
+}
 
 // Stockage temporaire des OTP en mémoire (évite la dépendance à la table otp_codes)
 const otpStore = new Map(); // phone -> { code, expiresAt }
