@@ -63,6 +63,48 @@ function parseSms(sender, body) {
   return null;
 }
 
+// ── Activation du boost (partagée webhook + filet de sécurité) ─────────────────
+async function activateBoost(payment) {
+  if (!payment || payment.type !== 'boost' || !payment.video_id) return;
+
+  // Récupère la vidéo pour figer les vues de départ (mesure de la portée gagnée)
+  const { data: video } = await supabaseAdmin
+    .from('videos')
+    .select('id, views, boosted')
+    .eq('id', payment.video_id)
+    .single();
+
+  if (!video) return;
+  if (video.boosted) return; // déjà activé (évite double activation)
+
+  const days = payment.boost_days || Math.max(1, Math.floor(payment.amount / 500));
+  const now = Date.now();
+  const boostEnd = new Date(now + days * 24 * 60 * 60 * 1000).toISOString();
+  const regions = (payment.target_regions && payment.target_regions.length > 0)
+    ? payment.target_regions
+    : [payment.target_region || 'all'];
+
+  await supabaseAdmin
+    .from('videos')
+    .update({
+      boosted: true,
+      boost_end: boostEnd,
+      boost_region: regions[0] || 'all',
+      boost_regions: regions,
+      boost_gender: payment.target_gender || 'all',
+      boost_age_min: payment.target_age_min || 0,
+      boost_age_max: payment.target_age_max || 120,
+      boost_amount: payment.amount || 0,
+      boost_views_start: video.views || 0,
+      boost_started_at: new Date(now).toISOString(),
+    })
+    .eq('id', payment.video_id);
+
+  console.log('[Boost] Activé vidéo', payment.video_id,
+    '-', days, 'j - régions:', regions.join(','),
+    '- genre:', payment.target_gender, '- enchère:', payment.amount);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 /**
@@ -71,13 +113,24 @@ function parseSms(sender, body) {
  */
 router.post('/initiate', requireAuth, async (req, res) => {
   try {
-    const { amount, type, videoId, operator, targetRegion } = req.body;
+    const {
+      amount, type, videoId, operator,
+      targetRegion, targetRegions, targetGender, targetAgeMin, targetAgeMax, boostDays,
+    } = req.body;
 
     if (!amount || amount < 100) {
       return res.status(400).json({ success: false, message: 'Montant invalide (min 100 FCFA)' });
     }
     if (!['mtn', 'moov'].includes(operator)) {
       return res.status(400).json({ success: false, message: 'Opérateur invalide (mtn ou moov)' });
+    }
+
+    // Normalise le ciblage régions (accepte un seul ou une liste)
+    let regions = ['all'];
+    if (Array.isArray(targetRegions) && targetRegions.length > 0) {
+      regions = targetRegions;
+    } else if (targetRegion) {
+      regions = [targetRegion];
     }
 
     const paymentNumber = operator === 'mtn' ? MTN_NUMBER : MOOV_NUMBER;
@@ -95,8 +148,13 @@ router.post('/initiate', requireAuth, async (req, res) => {
         status: 'pending',
         reference,
         payment_number: paymentNumber,
-        target_region: targetRegion || 'all', // région ciblée du boost
-
+        // Ciblage complet du boost
+        target_region: regions[0] || 'all',
+        target_regions: regions,
+        target_gender: targetGender || 'all',
+        target_age_min: parseInt(targetAgeMin, 10) || 0,
+        target_age_max: parseInt(targetAgeMax, 10) || 120,
+        boost_days: parseInt(boostDays, 10) || Math.max(1, Math.floor(amount / 500)),
         created_at: new Date().toISOString(),
         expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), // 30 min
       })
@@ -136,7 +194,7 @@ router.get('/status/:id', requireAuth, async (req, res) => {
   try {
     const { data: payment, error } = await supabaseAdmin
       .from('payments')
-      .select('id, status, amount, operator, reference, created_at, confirmed_at, transaction_id')
+      .select('*')
       .eq('id', req.params.id)
       .eq('user_id', req.user.id)
       .single();
@@ -145,7 +203,21 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Paiement introuvable' });
     }
 
-    return res.json({ success: true, payment });
+    // Filet de sécurité : si le paiement est confirmé mais que le boost
+    // n'a pas été activé (ex: webhook raté), on l'active ici.
+    if (payment.status === 'confirmed' && payment.type === 'boost' && payment.video_id) {
+      try { await activateBoost(payment); } catch (_) {}
+    }
+
+    return res.json({
+      success: true,
+      payment: {
+        id: payment.id, status: payment.status, amount: payment.amount,
+        operator: payment.operator, reference: payment.reference,
+        created_at: payment.created_at, confirmed_at: payment.confirmed_at,
+        transaction_id: payment.transaction_id,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Erreur interne' });
   }
@@ -210,18 +282,7 @@ router.post('/sms', async (req, res) => {
 
     // Active le boost si c'est un boost
     if (payment.type === 'boost' && payment.video_id) {
-      const days = Math.floor(payment.amount / 500); // 500F = 1 jour de boost
-      const boostEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-      await supabaseAdmin
-        .from('videos')
-        .update({
-          boosted: true,
-          boost_end: boostEnd,
-          boost_region: payment.target_region || 'all', // ciblage régional
-        })
-        .eq('id', payment.video_id);
-      console.log('[SMS] Boost activé pour vidéo', payment.video_id,
-        '- durée:', days, 'jours - région:', payment.target_region || 'all');
+      await activateBoost(payment);
     }
 
     console.log('[SMS] Paiement', payment.id, 'confirmé !');

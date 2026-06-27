@@ -166,7 +166,7 @@ router.post('/verify-otp', async (req, res) => {
  */
 router.put('/profile', requireAuth, async (req, res) => {
   try {
-    const { username, bio, avatar_url, region } = req.body;
+    const { username, bio, avatar_url, region, gender, birthYear } = req.body;
     const updates = {};
 
     // Région déclarée ou détectée par GPS (doit être un des 12 départements)
@@ -175,6 +175,21 @@ router.put('/profile', requireAuth, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Région invalide' });
       }
       updates.region = region || null;
+    }
+
+    // Démographie (pour le ciblage du boost)
+    if (gender !== undefined) {
+      if (gender && !['homme', 'femme'].includes(gender)) {
+        return res.status(400).json({ success: false, message: 'Genre invalide' });
+      }
+      updates.gender = gender || null;
+    }
+    if (birthYear !== undefined) {
+      const y = parseInt(birthYear, 10);
+      if (birthYear && (isNaN(y) || y < 1920 || y > new Date().getFullYear())) {
+        return res.status(400).json({ success: false, message: 'Année de naissance invalide' });
+      }
+      updates.birth_year = birthYear ? y : null;
     }
 
     if (username) {
@@ -210,7 +225,7 @@ router.put('/profile', requireAuth, async (req, res) => {
       .from('users')
       .update(updates)
       .eq('id', req.user.id)
-      .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance, region')
+      .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance, region, gender, birth_year')
       .single();
 
     if (error) {

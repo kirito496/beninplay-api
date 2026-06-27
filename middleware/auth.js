@@ -31,7 +31,7 @@ async function requireAuth(req, res, next) {
     // Vérifier que l'utilisateur existe toujours en base
     const { data: user, error } = await supabaseAdmin
       .from('users')
-      .select('id, phone, username, is_creator, is_active, wallet_balance, region')
+      .select('id, phone, username, is_creator, is_active, wallet_balance, region, gender, birth_year')
       .eq('id', decoded.userId)
       .single();
 
@@ -67,7 +67,7 @@ async function optionalAuth(req, res, next) {
 
     const { data: user } = await supabaseAdmin
       .from('users')
-      .select('id, phone, username, is_creator, is_active, wallet_balance, region')
+      .select('id, phone, username, is_creator, is_active, wallet_balance, region, gender, birth_year')
       .eq('id', decoded.userId)
       .single();
 

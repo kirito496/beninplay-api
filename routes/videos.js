@@ -161,41 +161,66 @@ router.get('/', optionalAuth, async (req, res) => {
       return res.status(500).json({ success: false, message: 'Erreur lors du chargement des vidéos' });
     }
 
-    // ── Boost ciblé : sur la 1re page, on remonte les vidéos boostées ──────────
-    // qui ciblent la région du viewer (ou "all"). Le viewer voit en priorité
-    // les boosts de son département.
+    // ── Boost ciblé : sur la 1re page, on remonte les vidéos boostées qui
+    // correspondent au viewer (région + genre + âge), triées par enchère.
     if (page === 1 && !tag && !creatorId) {
       const viewerRegion = req.user?.region || null;
+      const viewerGender = req.user?.gender || null;
+      const viewerAge = req.user?.birth_year
+        ? new Date().getFullYear() - req.user.birth_year
+        : null;
       const nowIso = new Date().toISOString();
+
+      // Régions ciblées qui matchent : "all" + la région du viewer
+      const regionMatch = viewerRegion ? ['all', viewerRegion] : ['all'];
 
       let boostQuery = supabaseAdmin
         .from('videos')
         .select(`
-          id, title, description, video_url, thumbnail_url, tags,
+          id, title, description, video_url, thumbnail_url, tags, zone,
           views, likes_count, comments_count, shares_count, created_at,
-          boost_region, boost_end,
+          boost_region, boost_regions, boost_end, boost_amount,
+          boost_gender, boost_age_min, boost_age_max,
           creator:users!creator_id(id, username, avatar_url, is_creator)
         `)
         .eq('status', 'published')
         .eq('boosted', true)
         .gt('boost_end', nowIso)
+        .overlaps('boost_regions', regionMatch)  // multi-région
+        .order('boost_amount', { ascending: false })  // enchère : qui paie plus passe devant
         .order('boost_end', { ascending: false })
-        .limit(8);
+        .limit(20);
 
-      // Cible : "all" toujours + la région du viewer si connue
-      if (viewerRegion) {
-        boostQuery = boostQuery.in('boost_region', ['all', viewerRegion]);
-      } else {
-        boostQuery = boostQuery.eq('boost_region', 'all');
+      let { data: boosted } = await boostQuery;
+      boosted = (boosted || []).filter((b) => {
+        // Cohérence de zone : pas de vidéo Dark dans le feed normal
+        if (b.zone === 'dark') return false;
+        // Ciblage genre
+        if (b.boost_gender && b.boost_gender !== 'all') {
+          if (!viewerGender || viewerGender !== b.boost_gender) return false;
+        }
+        // Ciblage âge
+        if (viewerAge != null) {
+          if (viewerAge < (b.boost_age_min || 0) || viewerAge > (b.boost_age_max || 120)) return false;
+        }
+        return true;
+      });
+
+      // Rotation simple : on garde le top enchères mais on mélange légèrement
+      // pour ne pas toujours afficher exactement le même ordre.
+      const topBoosted = boosted.slice(0, 8);
+      for (let i = topBoosted.length - 1; i > 0; i--) {
+        // mélange seulement parmi les enchères égales (groupes), léger
+        if (topBoosted[i].boost_amount === topBoosted[i - 1].boost_amount) {
+          const seed = (Date.now() + i) % 2;
+          if (seed === 0) { const t = topBoosted[i]; topBoosted[i] = topBoosted[i - 1]; topBoosted[i - 1] = t; }
+        }
       }
 
-      const { data: boosted } = await boostQuery;
-
-      if (boosted && boosted.length > 0) {
-        const boostedIds = new Set(boosted.map((b) => b.id));
-        // Retire les boostées de la liste normale puis les place en tête
+      if (topBoosted.length > 0) {
+        const boostedIds = new Set(topBoosted.map((b) => b.id));
         const rest = (videos || []).filter((v) => !boostedIds.has(v.id));
-        videos = [...boosted, ...rest];
+        videos = [...topBoosted, ...rest];
       }
     }
 
@@ -278,6 +303,92 @@ router.get('/liked', requireAuth, async (req, res) => {
     // Marque toutes comme aimées
     const result = (videos || []).map((v) => ({ ...v, is_liked: true }));
     return res.json({ success: true, videos: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/my-boosts
+ * Tableau de bord : les vidéos boostées de l'utilisateur + performances
+ */
+router.get('/my-boosts', requireAuth, async (req, res) => {
+  try {
+    const { data: videos, error } = await supabaseAdmin
+      .from('videos')
+      .select('id, title, thumbnail_url, video_url, views, likes_count, boosted, boost_end, boost_regions, boost_region, boost_gender, boost_amount, boost_views_start, boost_started_at')
+      .eq('creator_id', req.user.id)
+      .eq('boosted', true)
+      .order('boost_started_at', { ascending: false });
+
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    const now = Date.now();
+    const boosts = (videos || []).map((v) => {
+      const end = v.boost_end ? new Date(v.boost_end).getTime() : 0;
+      const active = end > now;
+      const msLeft = Math.max(0, end - now);
+      const viewsGained = Math.max(0, (v.views || 0) - (v.boost_views_start || 0));
+      return {
+        id: v.id,
+        title: v.title,
+        thumbnail_url: v.thumbnail_url,
+        video_url: v.video_url,
+        active,
+        days_left: Math.ceil(msLeft / (24 * 60 * 60 * 1000)),
+        hours_left: Math.ceil(msLeft / (60 * 60 * 1000)),
+        boost_end: v.boost_end,
+        regions: v.boost_regions || [v.boost_region || 'all'],
+        gender: v.boost_gender || 'all',
+        amount: v.boost_amount || 0,
+        views_total: v.views || 0,
+        views_gained: viewsGained,
+        likes: v.likes_count || 0,
+      };
+    });
+
+    return res.json({ success: true, boosts });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/boost-reach
+ * Estime le nombre d'utilisateurs touchés par un ciblage donné
+ * Query: regions=Littoral,Ouémé (ou 'all'), gender=all|homme|femme, ageMin, ageMax
+ */
+router.get('/boost-reach', requireAuth, async (req, res) => {
+  try {
+    const regionsRaw = (req.query.regions || 'all').toString();
+    const regions = regionsRaw.split(',').map((r) => r.trim()).filter(Boolean);
+    const gender = (req.query.gender || 'all').toString();
+    const ageMin = parseInt(req.query.ageMin, 10) || 0;
+    const ageMax = parseInt(req.query.ageMax, 10) || 120;
+
+    let q = supabaseAdmin
+      .from('users')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_active', true);
+
+    // Région (sauf si "all")
+    if (!regions.includes('all') && regions.length > 0) {
+      q = q.in('region', regions);
+    }
+    if (gender && gender !== 'all') {
+      q = q.eq('gender', gender);
+    }
+    if (ageMin > 0) {
+      q = q.lte('birth_year', new Date().getFullYear() - ageMin);
+    }
+    if (ageMax < 120) {
+      q = q.gte('birth_year', new Date().getFullYear() - ageMax);
+    }
+
+    const { count, error } = await q;
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    return res.json({ success: true, reach: count || 0 });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
