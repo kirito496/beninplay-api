@@ -67,15 +67,22 @@ function parseSms(sender, body) {
 async function activateBoost(payment) {
   if (!payment || payment.type !== 'boost' || !payment.video_id) return;
 
+  // Idempotence : si ce paiement a déjà été appliqué, on ne refait rien
+  if (payment.boost_applied === true) return;
+
   // Récupère la vidéo pour figer les vues de départ (mesure de la portée gagnée)
   const { data: video } = await supabaseAdmin
     .from('videos')
-    .select('id, views, boosted')
+    .select('id, views, boosted, boost_end')
     .eq('id', payment.video_id)
     .single();
 
   if (!video) return;
-  if (video.boosted) return; // déjà activé (évite double activation)
+
+  // Autorise un nouveau boost si l'ancien a expiré ; bloque seulement
+  // si un boost est ENCORE actif (évite la double activation simultanée).
+  const stillActive = video.boosted && video.boost_end && new Date(video.boost_end).getTime() > Date.now();
+  if (stillActive) return;
 
   const days = payment.boost_days || Math.max(1, Math.floor(payment.amount / 500));
   const now = Date.now();
@@ -100,6 +107,12 @@ async function activateBoost(payment) {
     })
     .eq('id', payment.video_id);
 
+  // Marque le paiement comme appliqué (idempotence : pas de double activation)
+  await supabaseAdmin
+    .from('payments')
+    .update({ boost_applied: true })
+    .eq('id', payment.id);
+
   console.log('[Boost] Activé vidéo', payment.video_id,
     '-', days, 'j - régions:', regions.join(','),
     '- genre:', payment.target_gender, '- enchère:', payment.amount);
@@ -123,6 +136,24 @@ router.post('/initiate', requireAuth, async (req, res) => {
     }
     if (!['mtn', 'moov'].includes(operator)) {
       return res.status(400).json({ success: false, message: 'Opérateur invalide (mtn ou moov)' });
+    }
+
+    // Pour un boost : vérifie que la vidéo appartient bien à l'utilisateur
+    if ((type === 'boost' || !type) && videoId) {
+      const { data: vid } = await supabaseAdmin
+        .from('videos')
+        .select('id, creator_id, status, zone')
+        .eq('id', videoId)
+        .single();
+      if (!vid) {
+        return res.status(404).json({ success: false, message: 'Vidéo introuvable' });
+      }
+      if (vid.creator_id !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Tu ne peux booster que tes propres vidéos' });
+      }
+      if (vid.zone === 'dark') {
+        return res.status(400).json({ success: false, message: 'Les vidéos de la Zone Dark ne peuvent pas être boostées dans le feed normal' });
+      }
     }
 
     // Normalise le ciblage régions (accepte un seul ou une liste)
@@ -250,6 +281,19 @@ router.post('/sms', async (req, res) => {
 
     console.log('[SMS] Parsé:', parsed);
 
+    // Anti-rejeu : si cette transaction MoMo a déjà été enregistrée, on ignore
+    if (parsed.transactionId) {
+      const { data: existing } = await supabaseAdmin
+        .from('payments')
+        .select('id')
+        .eq('transaction_id', parsed.transactionId)
+        .limit(1);
+      if (existing && existing.length > 0) {
+        console.log('[SMS] Transaction déjà traitée:', parsed.transactionId);
+        return res.json({ success: true, message: 'Déjà traité' });
+      }
+    }
+
     // Cherche un paiement en attente correspondant au montant
     const { data: payments } = await supabaseAdmin
       .from('payments')
@@ -258,7 +302,7 @@ router.post('/sms', async (req, res) => {
       .eq('operator', parsed.operator)
       .eq('amount', parsed.amount)
       .gte('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
+      .order('created_at', { ascending: true }) // le plus ancien d'abord (FIFO, plus juste)
       .limit(5);
 
     if (!payments || payments.length === 0) {

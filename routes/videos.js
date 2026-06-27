@@ -283,7 +283,7 @@ router.get('/liked', requireAuth, async (req, res) => {
   try {
     // Récupère les IDs des vidéos likées
     const { data: likes, error: likesErr } = await supabaseAdmin
-      .from('likes')
+      .from('video_likes')
       .select('video_id')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
@@ -391,6 +391,28 @@ router.get('/boost-reach', requireAuth, async (req, res) => {
     return res.json({ success: true, reach: count || 0 });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * POST /api/videos/:id/view
+ * Enregistre une vue (appelé par le feed quand une vidéo est regardée).
+ * Léger et non bloquant.
+ */
+router.post('/:id/view', optionalAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Essaie la fonction RPC, sinon incrément manuel en repli
+    const { error: rpcErr } = await supabaseAdmin.rpc('increment_views', { video_id: id });
+    if (rpcErr) {
+      const { data: v } = await supabaseAdmin.from('videos').select('views').eq('id', id).single();
+      if (v) {
+        await supabaseAdmin.from('videos').update({ views: (v.views || 0) + 1 }).eq('id', id);
+      }
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    return res.json({ success: true }); // jamais bloquant
   }
 });
 
