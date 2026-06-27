@@ -191,7 +191,6 @@ router.post('/initiate', requireAuth, async (req, res) => {
         user_id: req.user.id,
         video_id: videoId || null,
         amount: payAmount,         // montant exact à payer (unique)
-        base_amount: amount,       // montant de base (barème)
         operator,
         type: type || 'boost',
         status: 'pending',
