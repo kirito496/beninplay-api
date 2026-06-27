@@ -167,13 +167,31 @@ router.post('/initiate', requireAuth, async (req, res) => {
     const paymentNumber = operator === 'mtn' ? MTN_NUMBER : MOOV_NUMBER;
     const reference = `BP${Date.now().toString().slice(-8)}`;
 
+    // ── Montant unique : on ajoute un petit code (1-99) pour que chaque
+    // paiement en attente ait un montant exact distinct → matching SMS sans collision.
+    const nowIso = new Date().toISOString();
+    const { data: pendings } = await supabaseAdmin
+      .from('payments')
+      .select('amount')
+      .eq('operator', operator)
+      .eq('status', 'pending')
+      .gte('expires_at', nowIso)
+      .gte('amount', amount)
+      .lt('amount', amount + 100);
+    const used = new Set((pendings || []).map((p) => p.amount));
+    let payAmount = amount;
+    for (let off = 0; off <= 99; off++) {
+      if (!used.has(amount + off)) { payAmount = amount + off; break; }
+    }
+
     const { data: payment, error } = await supabaseAdmin
       .from('payments')
       .insert({
         id: uuidv4(),
         user_id: req.user.id,
         video_id: videoId || null,
-        amount,
+        amount: payAmount,         // montant exact à payer (unique)
+        base_amount: amount,       // montant de base (barème)
         operator,
         type: type || 'boost',
         status: 'pending',
