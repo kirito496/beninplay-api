@@ -161,6 +161,32 @@ router.get('/', optionalAuth, async (req, res) => {
       return res.status(500).json({ success: false, message: 'Erreur lors du chargement des vidéos' });
     }
 
+    // ── Placement sponsorisé par hashtag : si on filtre par tag, les vidéos
+    // boostées sur ce hashtag remontent en tête (triées par enchère).
+    if (page === 1 && tag && !creatorId) {
+      const nowIso = new Date().toISOString();
+      const { data: promo } = await supabaseAdmin
+        .from('videos')
+        .select(`
+          id, title, description, video_url, thumbnail_url, tags, zone,
+          views, likes_count, comments_count, shares_count, created_at, boost_end, boost_amount,
+          creator:users!creator_id(id, username, avatar_url, is_creator)
+        `)
+        .eq('status', 'published')
+        .eq('boosted', true)
+        .gt('boost_end', nowIso)
+        .contains('boost_tags', [tag.toLowerCase()])
+        .order('boost_amount', { ascending: false })
+        .limit(5);
+
+      const promoted = (promo || []).filter((b) => b.zone !== 'dark');
+      if (promoted.length > 0) {
+        const ids = new Set(promoted.map((b) => b.id));
+        const rest = (videos || []).filter((v) => !ids.has(v.id));
+        videos = [...promoted, ...rest];
+      }
+    }
+
     // ── Boost ciblé : sur la 1re page, on remonte les vidéos boostées qui
     // correspondent au viewer (région + genre + âge), triées par enchère.
     if (page === 1 && !tag && !creatorId) {
@@ -389,6 +415,88 @@ router.get('/boost-reach', requireAuth, async (req, res) => {
     if (error) return res.status(500).json({ success: false, message: error.message });
 
     return res.json({ success: true, reach: count || 0 });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/following
+ * Feed "Abonnements" : vidéos des créateurs que je suis (anti-chronologique)
+ */
+router.get('/following', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '20', 10)));
+    const offset = (page - 1) * limit;
+
+    // IDs des créateurs suivis
+    const { data: follows } = await supabaseAdmin
+      .from('follows').select('following_id').eq('follower_id', req.user.id);
+    const ids = (follows || []).map((f) => f.following_id);
+    if (ids.length === 0) return res.json({ success: true, videos: [] });
+
+    const { data: videos, error } = await supabaseAdmin
+      .from('videos')
+      .select(`
+        id, title, description, video_url, thumbnail_url, tags, zone,
+        views, likes_count, comments_count, created_at,
+        creator:users!creator_id(id, username, avatar_url, is_creator)
+      `)
+      .eq('status', 'published')
+      .in('creator_id', ids)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    // Likes du viewer
+    let likedIds = new Set();
+    if (videos && videos.length > 0) {
+      const vIds = videos.map((v) => v.id);
+      const { data: likes } = await supabaseAdmin
+        .from('video_likes').select('video_id').eq('user_id', req.user.id).in('video_id', vIds);
+      if (likes) likedIds = new Set(likes.map((l) => l.video_id));
+    }
+
+    const enriched = (videos || []).map((v) => ({
+      ...v,
+      creator_name: v.creator?.username || 'Créateur',
+      creator_avatar: v.creator?.avatar_url || null,
+      is_liked: likedIds.has(v.id),
+    }));
+
+    return res.json({ success: true, videos: enriched });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/popular-tags
+ * Renvoie les hashtags les plus utilisés (pour le ciblage du boost)
+ */
+router.get('/popular-tags', async (req, res) => {
+  try {
+    const { data: rows } = await supabaseAdmin
+      .from('videos')
+      .select('tags')
+      .eq('status', 'published')
+      .limit(500);
+
+    const counts = {};
+    for (const r of rows || []) {
+      for (const t of (r.tags || [])) {
+        const k = t.toString().toLowerCase();
+        counts[k] = (counts[k] || 0) + 1;
+      }
+    }
+    const tags = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 30)
+      .map(([tag, count]) => ({ tag, count }));
+
+    return res.json({ success: true, tags });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

@@ -17,6 +17,7 @@ if (missingEnvVars.length > 0) {
 // Routes
 const authRoutes = require('./routes/auth');
 const videosRoutes = require('./routes/videos');
+const usersRoutes = require('./routes/users');
 const walletRoutes = require('./routes/wallet');
 const chatRoutes = require('./routes/chat');
 const paymentsRoutes = require('./routes/payments');
@@ -77,6 +78,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/videos', videosRoutes);
+app.use('/api/users', usersRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/payments', paymentsRoutes);
