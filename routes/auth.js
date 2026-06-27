@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
+const { getClientIp, geoFromIp, BENIN_REGIONS } = require('../services/geo');
 
 const router = express.Router();
 
@@ -165,8 +166,16 @@ router.post('/verify-otp', async (req, res) => {
  */
 router.put('/profile', requireAuth, async (req, res) => {
   try {
-    const { username, bio, avatar_url } = req.body;
+    const { username, bio, avatar_url, region } = req.body;
     const updates = {};
+
+    // Région déclarée ou détectée par GPS (doit être un des 12 départements)
+    if (region !== undefined && region !== null) {
+      if (region !== '' && !BENIN_REGIONS.includes(region)) {
+        return res.status(400).json({ success: false, message: 'Région invalide' });
+      }
+      updates.region = region || null;
+    }
 
     if (username) {
       if (!/^[a-zA-Z0-9_]{3,30}$/.test(username)) {
@@ -201,7 +210,7 @@ router.put('/profile', requireAuth, async (req, res) => {
       .from('users')
       .update(updates)
       .eq('id', req.user.id)
-      .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance')
+      .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance, region')
       .single();
 
     if (error) {
@@ -219,7 +228,29 @@ router.put('/profile', requireAuth, async (req, res) => {
  * GET /api/auth/me
  */
 router.get('/me', requireAuth, async (req, res) => {
-  return res.json({ success: true, user: req.user });
+  try {
+    // Si l'utilisateur n'a pas encore de région, on l'estime via son IP (approximatif)
+    if (!req.user.region) {
+      const ip = getClientIp(req);
+      const geo = await geoFromIp(ip);
+      if (geo) {
+        // Sauvegarde la région estimée + signale si VPN (hors Bénin)
+        if (geo.region) {
+          await supabaseAdmin
+            .from('users')
+            .update({ region: geo.region })
+            .eq('id', req.user.id);
+          req.user.region = geo.region;
+        }
+        req.user.geo_country = geo.country;
+        req.user.geo_is_vpn = geo.isVpn;
+        req.user.region_source = 'ip'; // approximatif
+      }
+    }
+    return res.json({ success: true, user: req.user });
+  } catch (_) {
+    return res.json({ success: true, user: req.user });
+  }
 });
 
 /**

@@ -1,42 +1,151 @@
 'use strict';
+
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+
+// Valider les variables d'environnement critiques au démarrage
 const requiredEnvVars = ['JWT_SECRET', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 const missingEnvVars = requiredEnvVars.filter((v) => !process.env[v]);
-if (missingEnvVars.length > 0) { console.error(`[Server] Variables manquantes: ${missingEnvVars.join(', ')}`); process.exit(1); }
+if (missingEnvVars.length > 0) {
+  console.error(`[Server] Variables d'environnement manquantes: ${missingEnvVars.join(', ')}`);
+  process.exit(1);
+}
+
+// Routes
 const authRoutes = require('./routes/auth');
 const videosRoutes = require('./routes/videos');
 const walletRoutes = require('./routes/wallet');
 const chatRoutes = require('./routes/chat');
-const followsRoutes = require('./routes/follows');
-const boostsRoutes = require('./routes/boosts');
 const paymentsRoutes = require('./routes/payments');
+
+// WebSocket
 const { initWebSocketServer } = require('./websocket/chat');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+
+// Derrière le proxy Railway : lire la vraie IP du client (x-forwarded-for)
+app.set('trust proxy', true);
+
+// ============================================================
+// Middlewares globaux
+// ============================================================
+
+// CORS - autoriser toutes les origines (application mobile)
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// Parser JSON (max 10MB pour les payloads)
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.get('/', (_req, res) => res.json({ name: 'BeninPlay API', version: '1.0.0', status: 'en ligne' }));
-app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+// Logger des requêtes en développement
+if (process.env.NODE_ENV === 'development') {
+  app.use((req, _res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    next();
+  });
+}
+
+// ============================================================
+// Routes de santé
+// ============================================================
+
+app.get('/', (_req, res) => {
+  res.json({
+    name: 'BeninPlay API',
+    version: '1.0.0',
+    status: 'en ligne',
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'production',
+  });
+});
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// ============================================================
+// Routes API
+// ============================================================
+
 app.use('/api/auth', authRoutes);
 app.use('/api/videos', videosRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/chat', chatRoutes);
-app.use('/api/follows', followsRoutes);
-app.use('/api/boosts', boostsRoutes);
 app.use('/api/payments', paymentsRoutes);
-app.use((_req, res) => res.status(404).json({ success: false, message: 'Route introuvable' }));
+
+// ============================================================
+// Gestion des erreurs globale
+// ============================================================
+
+// 404 - Route non trouvée
+app.use((_req, res) => {
+  res.status(404).json({ success: false, message: 'Route introuvable' });
+});
+
+// Gestionnaire d'erreurs global
 app.use((err, _req, res, _next) => {
-  if (err.type === 'entity.too.large') return res.status(413).json({ success: false, message: 'Requête trop volumineuse' });
+  console.error('[Server] Erreur non gérée:', err.message, err.stack);
+
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: 'Requête trop volumineuse' });
+  }
+
+  if (err.name === 'SyntaxError' && err.status === 400) {
+    return res.status(400).json({ success: false, message: 'JSON invalide dans le corps de la requête' });
+  }
+
   return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
 });
+
+// ============================================================
+// Démarrage du serveur
+// ============================================================
+
 const server = http.createServer(app);
+
+// Initialiser le serveur WebSocket sur le même port HTTP
 initWebSocketServer(server);
-server.listen(PORT, () => console.log(`BeninPlay API démarrée sur le port ${PORT}`));
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
-process.on('uncaughtException', (err) => { console.error(err.message); process.exit(1); });
+
+server.listen(PORT, () => {
+  console.log(`
+  ┌─────────────────────────────────────────┐
+  │   BeninPlay API démarrée                │
+  │   Port     : ${PORT}                        │
+  │   Env      : ${(process.env.NODE_ENV || 'production').padEnd(11)}            │
+  │   WebSocket: ws://localhost:${PORT}/ws       │
+  └─────────────────────────────────────────┘
+  `);
+});
+
+// Gestion propre de l'arrêt (Railway SIGTERM)
+process.on('SIGTERM', () => {
+  console.log('[Server] Signal SIGTERM reçu, arrêt propre...');
+  server.close(() => {
+    console.log('[Server] Serveur arrêté.');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('[Server] Signal SIGINT reçu, arrêt...');
+  server.close(() => process.exit(0));
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Exception non capturée:', err.message, err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Server] Promesse rejetée non gérée:', reason);
+});
+
 module.exports = { app, server };

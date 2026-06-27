@@ -154,11 +154,49 @@ router.get('/', optionalAuth, async (req, res) => {
       query = query.eq('creator_id', creatorId);
     }
 
-    const { data: videos, error, count } = await query;
+    let { data: videos, error, count } = await query;
 
     if (error) {
       console.error('[Videos] Erreur liste:', error);
       return res.status(500).json({ success: false, message: 'Erreur lors du chargement des vidéos' });
+    }
+
+    // ── Boost ciblé : sur la 1re page, on remonte les vidéos boostées ──────────
+    // qui ciblent la région du viewer (ou "all"). Le viewer voit en priorité
+    // les boosts de son département.
+    if (page === 1 && !tag && !creatorId) {
+      const viewerRegion = req.user?.region || null;
+      const nowIso = new Date().toISOString();
+
+      let boostQuery = supabaseAdmin
+        .from('videos')
+        .select(`
+          id, title, description, video_url, thumbnail_url, tags,
+          views, likes_count, comments_count, shares_count, created_at,
+          boost_region, boost_end,
+          creator:users!creator_id(id, username, avatar_url, is_creator)
+        `)
+        .eq('status', 'published')
+        .eq('boosted', true)
+        .gt('boost_end', nowIso)
+        .order('boost_end', { ascending: false })
+        .limit(8);
+
+      // Cible : "all" toujours + la région du viewer si connue
+      if (viewerRegion) {
+        boostQuery = boostQuery.in('boost_region', ['all', viewerRegion]);
+      } else {
+        boostQuery = boostQuery.eq('boost_region', 'all');
+      }
+
+      const { data: boosted } = await boostQuery;
+
+      if (boosted && boosted.length > 0) {
+        const boostedIds = new Set(boosted.map((b) => b.id));
+        // Retire les boostées de la liste normale puis les place en tête
+        const rest = (videos || []).filter((v) => !boostedIds.has(v.id));
+        videos = [...boosted, ...rest];
+      }
     }
 
     // Si l'utilisateur est connecté, récupérer ses likes
@@ -173,11 +211,13 @@ router.get('/', optionalAuth, async (req, res) => {
       if (likes) likedVideoIds = new Set(likes.map((l) => l.video_id));
     }
 
+    const nowMs = Date.now();
     const enrichedVideos = videos.map((v) => ({
       ...v,
       creator_name: v.creator?.username || 'Créateur',
       creator_avatar: v.creator?.avatar_url || null,
       is_liked: likedVideoIds.has(v.id),
+      is_boosted: v.boost_end ? new Date(v.boost_end).getTime() > nowMs : false,
     }));
 
     return res.json({
@@ -205,6 +245,39 @@ router.get('/mine', requireAuth, async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, message: error.message });
     return res.json({ success: true, videos: videos || [] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/liked
+ * Vidéos aimées par l'utilisateur connecté
+ */
+router.get('/liked', requireAuth, async (req, res) => {
+  try {
+    // Récupère les IDs des vidéos likées
+    const { data: likes, error: likesErr } = await supabaseAdmin
+      .from('likes')
+      .select('video_id')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (likesErr) return res.status(500).json({ success: false, message: likesErr.message });
+
+    const ids = (likes || []).map((l) => l.video_id);
+    if (ids.length === 0) return res.json({ success: true, videos: [] });
+
+    const { data: videos, error } = await supabaseAdmin
+      .from('videos')
+      .select('id, title, description, video_url, thumbnail_url, tags, views, likes_count, comments_count, created_at, zone, creator_id')
+      .in('id', ids);
+
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    // Marque toutes comme aimées
+    const result = (videos || []).map((v) => ({ ...v, is_liked: true }));
+    return res.json({ success: true, videos: result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
