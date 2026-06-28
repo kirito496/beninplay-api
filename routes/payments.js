@@ -102,6 +102,7 @@ async function activateBoost(payment) {
       boost_age_min: payment.target_age_min || 0,
       boost_age_max: payment.target_age_max || 120,
       boost_amount: payment.amount || 0,
+      boost_tags: payment.target_tags || [],
       boost_views_start: video.views || 0,
       boost_started_at: new Date(now).toISOString(),
     })
@@ -128,7 +129,7 @@ router.post('/initiate', requireAuth, async (req, res) => {
   try {
     const {
       amount, type, videoId, operator,
-      targetRegion, targetRegions, targetGender, targetAgeMin, targetAgeMax, boostDays,
+      targetRegion, targetRegions, targetGender, targetAgeMin, targetAgeMax, boostDays, targetTags,
     } = req.body;
 
     if (!amount || amount < 100) {
@@ -202,6 +203,9 @@ router.post('/initiate', requireAuth, async (req, res) => {
         target_gender: targetGender || 'all',
         target_age_min: parseInt(targetAgeMin, 10) || 0,
         target_age_max: parseInt(targetAgeMax, 10) || 120,
+        target_tags: Array.isArray(targetTags)
+          ? targetTags.map((t) => t.toString().toLowerCase()).slice(0, 10)
+          : [],
         boost_days: parseInt(boostDays, 10) || Math.max(1, Math.floor(amount / 500)),
         created_at: new Date().toISOString(),
         expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), // 30 min
