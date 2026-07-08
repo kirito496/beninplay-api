@@ -1,56 +1,101 @@
-﻿'use strict';
+'use strict';
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
-const { initiatePayment, checkPaymentStatus, initiateTransfer, calculateRevenueSplit, MIN_WITHDRAWAL } = require('../services/payment');
+const { calculateRevenueSplit, MIN_WITHDRAWAL } = require('../services/payment');
 const router = express.Router();
+
+// Protection des routes admin par une clé secrète (variable d'env ADMIN_KEY).
+function requireAdmin(req, res, next) {
+  if (!process.env.ADMIN_KEY || req.headers['x-admin-key'] !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ success: false, message: 'Non autorisé' });
+  }
+  next();
+}
+
+// ── Solde + dernières transactions ─────────────────────────────────────────
 router.get('/balance', requireAuth, async (req, res) => {
   const { data: u } = await supabaseAdmin.from('users').select('wallet_balance').eq('id', req.user.id).single();
-  const { data: tx } = await supabaseAdmin.from('transactions').select('id,type,amount,status,description,created_at').eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(20);
+  const { data: tx } = await supabaseAdmin.from('transactions')
+    .select('id,type,amount,status,description,created_at')
+    .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(20);
   return res.json({ success: true, balance: u?.wallet_balance || 0, currency: 'FCFA', transactions: tx || [], minWithdrawal: MIN_WITHDRAWAL });
 });
-router.post('/deposit', requireAuth, async (req, res) => {
-  const { amount, phone, return_url } = req.body;
-  const a = parseInt(amount, 10);
-  if (!a || a < 100) return res.status(400).json({ success: false, message: 'Minimum 100 FCFA' });
-  const tid = uuidv4();
-  await supabaseAdmin.from('transactions').insert({ id: tid, user_id: req.user.id, type: 'deposit', amount: a, status: 'pending', description: `Dépôt ${a} FCFA`, created_at: new Date().toISOString() });
-  const r = await initiatePayment({ amount: a, description: `Recharge BeninPlay ${a} FCFA`, customerId: req.user.id, customerPhone: phone || req.user.phone, returnUrl: return_url });
-  if (!r.success) { await supabaseAdmin.from('transactions').update({ status: 'failed' }).eq('id', tid); return res.status(502).json({ success: false, message: 'Paiement impossible. Réessayez.' }); }
-  await supabaseAdmin.from('transactions').update({ cinetpay_transaction_id: r.transactionId }).eq('id', tid);
-  return res.json({ success: true, paymentUrl: r.paymentUrl, transactionId: tid, amount: a });
-});
-router.post('/notify', async (req, res) => {
-  const { cpm_trans_id, cpm_site_id, cpm_amount } = req.body;
-  if (cpm_site_id !== process.env.CINETPAY_SITE_ID) return res.status(400).send('KO');
-  const s = await checkPaymentStatus(cpm_trans_id);
-  if (!s.success || s.status !== 'ACCEPTED') return res.send('KO');
-  const { data: tx } = await supabaseAdmin.from('transactions').select('*').eq('cinetpay_transaction_id', cpm_trans_id).single();
-  if (!tx || tx.status === 'completed') return res.send('OK');
-  await supabaseAdmin.from('transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', tx.id);
-  await supabaseAdmin.rpc('increment_wallet_balance', { user_id: tx.user_id, amount: parseInt(cpm_amount, 10) });
-  return res.send('OK');
-});
+
+// ── Demande de retrait (traitement manuel gratuit) ─────────────────────────
+// Le solde est réservé immédiatement ; l'admin envoie le MoMo puis valide.
 router.post('/withdraw', requireAuth, async (req, res) => {
   if (!req.user.is_creator) return res.status(403).json({ success: false, message: 'Réservé aux créateurs' });
   const { amount, phone, operator } = req.body;
   const a = parseInt(amount, 10);
   if (!a || a < MIN_WITHDRAWAL) return res.status(400).json({ success: false, message: `Minimum ${MIN_WITHDRAWAL} FCFA` });
-  if (!['MTN','MOOV'].includes((operator||'').toUpperCase())) return res.status(400).json({ success: false, message: 'Opérateur: MTN ou MOOV' });
+  const op = (operator || '').toUpperCase();
+  if (!['MTN', 'MOOV'].includes(op)) return res.status(400).json({ success: false, message: 'Opérateur : MTN ou MOOV' });
+  const cleanPhone = String(phone || '').replace(/\s/g, '');
+  if (cleanPhone.length < 8) return res.status(400).json({ success: false, message: 'Numéro Mobile Money invalide' });
+
   const split = calculateRevenueSplit(a);
   const { data: u } = await supabaseAdmin.from('users').select('wallet_balance').eq('id', req.user.id).single();
-  if (!u || u.wallet_balance < a) return res.status(400).json({ success: false, message: `Solde insuffisant (${u?.wallet_balance||0} FCFA)` });
-  const tid = uuidv4();
-  await supabaseAdmin.from('transactions').insert({ id: tid, user_id: req.user.id, type: 'withdrawal', amount: a, net_amount: split.creatorNet, status: 'pending', description: `Retrait ${operator} ${phone}`, created_at: new Date().toISOString() });
-  await supabaseAdmin.rpc('decrement_wallet_balance', { user_id: req.user.id, amount: a });
-  const tr = await initiateTransfer({ amount: split.creatorNet, phoneNumber: phone, operator: operator.toUpperCase() });
-  if (!tr.success) {
-    await supabaseAdmin.rpc('increment_wallet_balance', { user_id: req.user.id, amount: a });
-    await supabaseAdmin.from('transactions').update({ status: 'failed' }).eq('id', tid);
-    return res.status(502).json({ success: false, message: 'Échec transfert. Solde restauré.' });
+  if (!u || u.wallet_balance < a) return res.status(400).json({ success: false, message: `Solde insuffisant (${u?.wallet_balance || 0} FCFA)` });
+
+  // Réserver le solde (empêche de retirer deux fois le même argent)
+  try {
+    await supabaseAdmin.rpc('decrement_wallet_balance', { user_id: req.user.id, amount: a });
+  } catch {
+    return res.status(400).json({ success: false, message: 'Solde insuffisant' });
   }
-  await supabaseAdmin.from('transactions').update({ status: 'processing', cinetpay_transaction_id: tr.transactionId }).eq('id', tid);
-  return res.json({ success: true, message: `Vous recevrez ${split.creatorNet} FCFA sur votre ${operator.toUpperCase()}`, details: { requested: a, momoFee: split.momoFee, netAmount: split.creatorNet } });
+
+  const tid = uuidv4();
+  const { error: insErr } = await supabaseAdmin.from('transactions').insert({
+    id: tid, user_id: req.user.id, type: 'withdrawal', amount: a, net_amount: split.creatorNet,
+    status: 'pending', description: `Retrait ${op} ${cleanPhone}`,
+    metadata: { phone: cleanPhone, operator: op, momoFee: split.momoFee, netAmount: split.creatorNet },
+    created_at: new Date().toISOString(),
+  });
+  if (insErr) {
+    // Échec d'enregistrement : on rend le solde
+    await supabaseAdmin.rpc('increment_wallet_balance', { user_id: req.user.id, amount: a });
+    return res.status(500).json({ success: false, message: 'Erreur. Réessayez.' });
+  }
+
+  return res.json({
+    success: true,
+    message: `Demande enregistrée ✅ Tu recevras ${split.creatorNet} FCFA sur ton ${op} (${cleanPhone}) sous 24 h.`,
+    details: { requested: a, momoFee: split.momoFee, netAmount: split.creatorNet, status: 'pending' },
+  });
 });
+
+// ── ADMIN : lister les retraits à traiter ──────────────────────────────────
+// GET /api/wallet/admin/withdrawals?status=pending   (en-tête x-admin-key)
+router.get('/admin/withdrawals', requireAdmin, async (req, res) => {
+  const status = req.query.status || 'pending';
+  const { data } = await supabaseAdmin.from('transactions')
+    .select('id, user_id, amount, net_amount, status, description, metadata, created_at')
+    .eq('type', 'withdrawal').eq('status', status)
+    .order('created_at', { ascending: true }).limit(100);
+  return res.json({ success: true, count: (data || []).length, withdrawals: data || [] });
+});
+
+// ── ADMIN : marquer un retrait comme payé (après envoi manuel du MoMo) ──────
+router.post('/admin/withdrawals/:id/complete', requireAdmin, async (req, res) => {
+  const { data: tx } = await supabaseAdmin.from('transactions').select('*').eq('id', req.params.id).eq('type', 'withdrawal').single();
+  if (!tx) return res.status(404).json({ success: false, message: 'Retrait introuvable' });
+  if (tx.status === 'completed') return res.json({ success: true, message: 'Déjà payé' });
+  if (!['pending', 'processing'].includes(tx.status)) return res.status(400).json({ success: false, message: `Statut « ${tx.status} » non payable` });
+  await supabaseAdmin.from('transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', tx.id);
+  return res.json({ success: true, message: 'Retrait marqué comme payé ✅' });
+});
+
+// ── ADMIN : rejeter un retrait et rembourser le solde ──────────────────────
+router.post('/admin/withdrawals/:id/reject', requireAdmin, async (req, res) => {
+  const { data: tx } = await supabaseAdmin.from('transactions').select('*').eq('id', req.params.id).eq('type', 'withdrawal').single();
+  if (!tx) return res.status(404).json({ success: false, message: 'Retrait introuvable' });
+  if (tx.status === 'cancelled') return res.json({ success: true, message: 'Déjà annulé' });
+  if (tx.status === 'completed') return res.status(400).json({ success: false, message: 'Déjà payé, non remboursable' });
+  await supabaseAdmin.rpc('increment_wallet_balance', { user_id: tx.user_id, amount: tx.amount });
+  await supabaseAdmin.from('transactions').update({ status: 'cancelled' }).eq('id', tx.id);
+  return res.json({ success: true, message: 'Retrait rejeté, solde remboursé' });
+});
+
 module.exports = router;
