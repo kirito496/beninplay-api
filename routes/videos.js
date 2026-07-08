@@ -136,30 +136,42 @@ router.get('/', optionalAuth, async (req, res) => {
     const tag = req.query.tag;
     const creatorId = req.query.creator_id;
 
-    let query = supabaseAdmin
-      .from('videos')
-      .select(`
+    const selectWithZone = `
+        id, title, description, video_url, thumbnail_url, tags, zone,
+        views, likes_count, comments_count, shares_count, created_at,
+        creator:users!creator_id(id, username, avatar_url, is_creator)`;
+    const selectNoZone = `
         id, title, description, video_url, thumbnail_url, tags,
         views, likes_count, comments_count, shares_count, created_at,
-        creator:users!creator_id(id, username, avatar_url, is_creator)
-      `)
-      .eq('status', 'published')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+        creator:users!creator_id(id, username, avatar_url, is_creator)`;
 
-    if (tag) {
-      query = query.contains('tags', [tag.toLowerCase()]);
-    }
-    if (creatorId) {
-      query = query.eq('creator_id', creatorId);
-    }
+    const buildList = (sel) => {
+      let q = supabaseAdmin
+        .from('videos')
+        .select(sel)
+        .eq('status', 'published')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (tag) q = q.contains('tags', [tag.toLowerCase()]);
+      if (creatorId) q = q.eq('creator_id', creatorId);
+      return q;
+    };
 
-    let { data: videos, error, count } = await query;
+    // Tente avec la colonne "zone" ; repli sans elle si elle n'existe pas (pré-migration)
+    let hasZone = true;
+    let { data: videos, error } = await buildList(selectWithZone);
+    if (error) {
+      hasZone = false;
+      ({ data: videos, error } = await buildList(selectNoZone));
+    }
 
     if (error) {
       console.error('[Videos] Erreur liste:', error);
       return res.status(500).json({ success: false, message: 'Erreur lors du chargement des vidéos' });
     }
+
+    // Le feed normal ne montre JAMAIS les vidéos de la Zone Dark
+    if (hasZone) videos = (videos || []).filter((v) => v.zone !== 'dark');
 
     // ── Placement sponsorisé par hashtag : si on filtre par tag, les vidéos
     // boostées sur ce hashtag remontent en tête (triées par enchère).
@@ -459,7 +471,62 @@ router.get('/following', requireAuth, async (req, res) => {
       if (likes) likedIds = new Set(likes.map((l) => l.video_id));
     }
 
-    const enriched = (videos || []).map((v) => ({
+    const enriched = (videos || [])
+      .filter((v) => v.zone !== 'dark') // le feed Abonnements normal exclut le Dark
+      .map((v) => ({
+        ...v,
+        creator_name: v.creator?.username || 'Créateur',
+        creator_avatar: v.creator?.avatar_url || null,
+        is_liked: likedIds.has(v.id),
+      }));
+
+    return res.json({ success: true, videos: enriched });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/videos/dark
+ * Feed INDÉPENDANT de la Zone Dark (+18, réservé). Ne renvoie QUE les vidéos
+ * zone='dark'. Totalement séparé du feed normal.
+ */
+router.get('/dark', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '20', 10)));
+    const offset = (page - 1) * limit;
+
+    let videos = [];
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('videos')
+        .select(`
+          id, title, description, video_url, thumbnail_url, tags, zone,
+          views, likes_count, comments_count, created_at,
+          creator:users!creator_id(id, username, avatar_url, is_creator)
+        `)
+        .eq('status', 'published')
+        .eq('zone', 'dark')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (error) throw error;
+      videos = data || [];
+    } catch (e) {
+      // Colonne "zone" absente (migration pas encore appliquée) → aucune vidéo dark
+      console.warn('[Videos] feed dark indisponible:', e.message);
+      return res.json({ success: true, videos: [] });
+    }
+
+    let likedIds = new Set();
+    if (videos.length > 0) {
+      const vIds = videos.map((v) => v.id);
+      const { data: likes } = await supabaseAdmin
+        .from('video_likes').select('video_id').eq('user_id', req.user.id).in('video_id', vIds);
+      if (likes) likedIds = new Set(likes.map((l) => l.video_id));
+    }
+
+    const enriched = videos.map((v) => ({
       ...v,
       creator_name: v.creator?.username || 'Créateur',
       creator_avatar: v.creator?.avatar_url || null,
@@ -786,19 +853,20 @@ router.post('/register', requireAuth, async (req, res) => {
 
     let parsedTags = [];
     if (tags) {
-      parsedTags = (Array.isArray(tags) ? tags : tags.split(','))
+      parsedTags = (Array.isArray(tags) ? tags : String(tags).split(','))
         .map((t) => t.trim().toLowerCase())
         .filter((t) => t.length > 0)
         .slice(0, 10);
     }
 
-    const insertData = {
-      id: uuidv4(),
+    const id = uuidv4();
+    // Colonnes de base (garanties présentes dans le schéma)
+    const base = {
+      id,
       creator_id: req.user.id,
       title: title.trim().slice(0, 150),
       description: description?.trim().slice(0, 2000) || null,
       video_url,
-      zone: zone || 'normal',
       tags: parsedTags,
       status: 'published',
       views: 0,
@@ -806,28 +874,30 @@ router.post('/register', requireAuth, async (req, res) => {
       comments_count: 0,
       created_at: new Date().toISOString(),
     };
+    // Colonnes optionnelles (présentes seulement après la migration zone/dark)
+    const full = { ...base, zone: zone || 'normal', shares_count: 0 };
 
-    // Colonnes optionnelles — ajoutées seulement si elles existent dans le schéma
-    try { insertData.shares_count = 0; } catch (_) {}
-    try { insertData.file_size = 0; } catch (_) {}
+    // 1re tentative avec toutes les colonnes ; repli automatique si l'une
+    // d'elles n'existe pas encore dans la base (ex: colonne "zone" manquante).
+    let { data: video, error } = await supabaseAdmin
+      .from('videos').insert(full).select().single();
 
-    console.log('[Videos] register insert data:', JSON.stringify(insertData));
-
-    const { data: video, error } = await supabaseAdmin
-      .from('videos')
-      .insert(insertData)
-      .select()
-      .single();
+    if (error && /column|zone|shares_count|schema cache|does not exist/i.test(error.message || '')) {
+      console.warn('[Videos] register : repli sans colonnes optionnelles —', error.message);
+      ({ data: video, error } = await supabaseAdmin
+        .from('videos').insert(base).select().single());
+    }
 
     if (error) {
       console.error('[Videos] Erreur register:', error);
-      return res.status(500).json({ success: false, message: error.message });
+      // On renvoie la vraie cause au client (au lieu d'un message générique)
+      return res.status(500).json({ success: false, message: `Publication impossible : ${error.message}` });
     }
 
     return res.status(201).json({ success: true, message: 'Vidéo publiée !', video });
   } catch (err) {
     console.error('[Videos] register erreur:', err.message);
-    return res.status(500).json({ success: false, message: 'Erreur interne' });
+    return res.status(500).json({ success: false, message: err.message || 'Erreur interne' });
   }
 });
 
