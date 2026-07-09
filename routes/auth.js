@@ -6,8 +6,14 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { getClientIp, geoFromIp, BENIN_REGIONS } = require('../services/geo');
+const { sendVerificationCode } = require('../services/email');
 
 const router = express.Router();
+
+// ── Auth par EMAIL (codes envoyés via Brevo) ─────────────────────────────
+const emailOtpStore = new Map(); // email -> { code, expiresAt }
+const normalizeEmail = (e) => (e || '').trim().toLowerCase();
+const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 function normalizeBeninPhone(phone) {
   let cleaned = (phone || '').replace(/[\s\-]/g, '');
@@ -157,6 +163,112 @@ router.post('/verify-otp', async (req, res) => {
     });
   } catch (err) {
     console.error('[Auth] verify-otp erreur:', err.message);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * POST /api/auth/email/request — envoie un code de vérification par email
+ */
+router.post('/email/request', async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ success: false, message: 'Adresse email invalide' });
+    }
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    emailOtpStore.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    const r = await sendVerificationCode(email, code);
+    console.log(`[Auth] code email ${email} = ${code} (envoyé: ${r.sent})`);
+
+    return res.json({
+      success: true,
+      message: r.sent ? 'Code envoyé par email' : 'Code généré',
+      sent: r.sent,
+      // Sans Brevo configuré, on renvoie le code pour permettre les tests
+      ...(r.sent ? {} : { otp: code }),
+    });
+  } catch (err) {
+    console.error('[Auth] email/request erreur:', err.message);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * POST /api/auth/email/verify — vérifie le code et retourne un JWT
+ */
+router.post('/email/verify', async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const code = (req.body.code || '').toString().trim();
+    if (!isValidEmail(email) || !code) {
+      return res.status(400).json({ success: false, message: 'Email et code requis' });
+    }
+
+    const stored = emailOtpStore.get(email);
+    if (!stored || stored.code !== code || Date.now() > stored.expiresAt) {
+      return res.status(400).json({ success: false, message: 'Code invalide ou expiré' });
+    }
+    emailOtpStore.delete(email);
+
+    // Un seul compte par email (unique) → un seul compte peut monétiser
+    let { data: user } = await supabaseAdmin.from('users').select('*').eq('email', email).single();
+    let isNewUser = false;
+
+    if (!user) {
+      isNewUser = true;
+      const { data: created, error } = await supabaseAdmin
+        .from('users')
+        .insert({
+          id: uuidv4(),
+          email,
+          email_verified: true,
+          username: `user_${Date.now()}`,
+          is_creator: false,
+          is_active: true,
+          wallet_balance: 0,
+          created_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+      if (error) {
+        console.error('[Auth] création compte email:', error);
+        return res.status(500).json({ success: false, message: 'Erreur création du compte' });
+      }
+      user = created;
+    } else if (!user.email_verified) {
+      await supabaseAdmin.from('users').update({ email_verified: true }).eq('id', user.id);
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ success: false, message: 'Compte suspendu.' });
+    }
+
+    await supabaseAdmin.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id);
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    );
+
+    return res.json({
+      success: true,
+      message: isNewUser ? 'Compte créé avec succès' : 'Connexion réussie',
+      isNewUser,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar_url: user.avatar_url,
+        is_creator: user.is_creator,
+        wallet_balance: user.wallet_balance,
+      },
+    });
+  } catch (err) {
+    console.error('[Auth] email/verify erreur:', err.message);
     return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
   }
 });

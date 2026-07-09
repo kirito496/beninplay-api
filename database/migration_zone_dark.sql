@@ -29,6 +29,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS region VARCHAR(50);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_year INTEGER;
 
+-- ── Auth par email (Brevo) : un seul compte par email ─────────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ALTER COLUMN phone DROP NOT NULL; -- l'email peut désormais suffire
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) WHERE email IS NOT NULL;
+
 -- ── Demande de statut créateur (validation manuelle par l'admin) ───────
 ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_status VARCHAR(20) DEFAULT 'none';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_request_note TEXT;
