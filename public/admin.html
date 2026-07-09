@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BeninPlay — Admin</title>
+<style>
+  :root { --bg:#0b0b0f; --card:#16161d; --line:#26262f; --green:#00C853; --red:#FF5252;
+          --txt:#f2f2f5; --mut:#9a9aa5; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--txt); -webkit-font-smoothing:antialiased; }
+  header { padding:16px 18px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:10px; position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:17px; margin:0; font-weight:800; }
+  header .dot { width:9px; height:9px; border-radius:50%; background:var(--green); }
+  .wrap { max-width:820px; margin:0 auto; padding:16px; }
+  .keybar { display:flex; gap:8px; margin-bottom:14px; }
+  input { flex:1; background:var(--card); border:1px solid var(--line); color:var(--txt);
+          border-radius:10px; padding:12px; font-size:14px; }
+  button { border:none; border-radius:10px; padding:11px 14px; font-weight:700; font-size:13px;
+           cursor:pointer; color:#fff; background:#2a2a34; }
+  button.g { background:var(--green); color:#04210f; }
+  button.r { background:var(--red); }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--mut); }
+  .tabs { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  .tabs button { flex:1; min-width:120px; background:var(--card); color:var(--mut); }
+  .tabs button.active { background:var(--green); color:#04210f; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:14px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .big { font-size:16px; font-weight:800; }
+  .mut { color:var(--mut); font-size:12.5px; }
+  .amount { font-size:18px; font-weight:800; color:var(--green); }
+  .actions { display:flex; gap:8px; margin-top:12px; }
+  .actions button { flex:1; }
+  .photos { display:flex; gap:8px; margin-top:10px; }
+  .photos a { flex:1; }
+  .photos img { width:100%; height:120px; object-fit:cover; border-radius:10px; border:1px solid var(--line); }
+  .empty { text-align:center; color:var(--mut); padding:40px 0; }
+  .badge { font-size:11px; padding:3px 8px; border-radius:20px; background:#2a2a34; color:var(--mut); }
+  .badge.red { background:rgba(255,82,82,.15); color:var(--red); }
+  .toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+           background:#000; border:1px solid var(--line); padding:12px 18px; border-radius:12px;
+           font-size:13px; opacity:0; transition:.25s; pointer-events:none; z-index:20; max-width:90%; }
+  .toast.show { opacity:1; }
+  .count { font-size:12px; color:var(--mut); margin:-4px 0 12px; }
+</style>
+</head>
+<body>
+<header><span class="dot"></span><h1>BeninPlay — Console admin</h1></header>
+<div class="wrap">
+  <div class="keybar">
+    <input id="key" type="password" placeholder="Clé admin (ADMIN_KEY)" />
+    <button class="g" onclick="saveKey()">Connecter</button>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="withdrawals" class="active" onclick="go('withdrawals')">💸 Retraits</button>
+    <button data-tab="kyc" onclick="go('kyc')">🪪 KYC</button>
+    <button data-tab="creators" onclick="go('creators')">⭐ Créateurs</button>
+    <button data-tab="flagged" onclick="go('flagged')">🚩 Signalés</button>
+  </div>
+
+  <div class="count" id="count"></div>
+  <div id="list"><div class="empty">Entre ta clé admin puis charge une liste.</div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let TAB = 'withdrawals';
+function key() { return localStorage.getItem('bp_admin_key') || ''; }
+function saveKey() {
+  const k = $('#key').value.trim();
+  if (!k) return toast('Entre la clé admin');
+  localStorage.setItem('bp_admin_key', k);
+  toast('Clé enregistrée ✅'); load();
+}
+function toast(m) {
+  const t = $('#toast'); t.textContent = m; t.classList.add('show');
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('show'), 2600);
+}
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function api(path, method='GET') {
+  const res = await fetch(path, { method, headers: { 'x-admin-key': key() } });
+  let data = {}; try { data = await res.json(); } catch(_) {}
+  if (res.status === 401) { toast('Clé admin invalide'); throw new Error('401'); }
+  return data;
+}
+
+function go(tab) {
+  TAB = tab;
+  document.querySelectorAll('.tabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === tab));
+  load();
+}
+
+async function act(path, okMsg) {
+  try { const r = await api(path, 'POST'); toast(r.message || okMsg || 'OK'); load(); }
+  catch(e){ if(e.message!=='401') toast('Erreur'); }
+}
+
+async function load() {
+  if (!key()) { $('#list').innerHTML = '<div class="empty">Entre ta clé admin d\'abord.</div>'; return; }
+  $('#list').innerHTML = '<div class="empty">Chargement…</div>'; $('#count').textContent='';
+  try {
+    if (TAB === 'withdrawals') return renderWithdrawals(await api('/api/wallet/admin/withdrawals?status=pending'));
+    if (TAB === 'kyc')         return renderKyc(await api('/api/dark/kyc/pending'));
+    if (TAB === 'creators')    return renderCreators(await api('/api/auth/creator/requests'));
+    if (TAB === 'flagged')     return renderFlagged(await api('/api/monetization/flagged'));
+  } catch(e){ if(e.message!=='401') $('#list').innerHTML='<div class="empty">Erreur de chargement</div>'; }
+}
+
+function empty(m){ return '<div class="empty">'+m+'</div>'; }
+function setCount(n){ $('#count').textContent = n + ' élément' + (n>1?'s':''); }
+
+function renderWithdrawals(d) {
+  const items = d.withdrawals || [];
+  if (!items.length) return ($('#list').innerHTML = empty('Aucun retrait en attente 🎉'), setCount(0));
+  setCount(items.length);
+  $('#list').innerHTML = items.map(w => {
+    const m = w.metadata || {};
+    const phone = m.phone || '—', op = m.operator || '—';
+    const net = w.net_amount ?? m.netAmount ?? w.amount;
+    const date = new Date(w.created_at).toLocaleString('fr-FR');
+    return `<div class="card">
+      <div class="row"><div class="big">${esc(op)} · ${esc(phone)}</div>
+        <div class="amount">${esc(net)} FCFA</div></div>
+      <div class="mut">Demandé : ${esc(w.amount)} FCFA · ${esc(date)}</div>
+      <div class="mut">À envoyer par Mobile Money, puis clique « Payé ».</div>
+      <div class="actions">
+        <button class="g" onclick="act('/api/wallet/admin/withdrawals/${w.id}/complete','Payé')">✅ Payé</button>
+        <button class="r" onclick="act('/api/wallet/admin/withdrawals/${w.id}/reject','Rejeté')">✕ Refuser (rembourse)</button>
+      </div></div>`;
+  }).join('');
+}
+
+function renderKyc(d) {
+  const items = d.pending || [];
+  if (!items.length) return ($('#list').innerHTML = empty('Aucune pièce à vérifier 🎉'), setCount(0));
+  setCount(items.length);
+  $('#list').innerHTML = items.map(u => {
+    const who = u.username || u.email || u.phone || u.id;
+    const front = u.kyc_front_url, back = u.kyc_back_url;
+    const photos = (front||back) ? `<div class="photos">
+        ${front?`<a href="${esc(front)}" target="_blank"><img src="${esc(front)}" alt="recto"></a>`:''}
+        ${back?`<a href="${esc(back)}" target="_blank"><img src="${esc(back)}" alt="verso"></a>`:''}
+      </div>` : '<div class="mut">⚠️ Aucune photo reçue</div>';
+    return `<div class="card">
+      <div class="big">${esc(who)}</div>
+      <div class="mut">${esc(u.email||'')} ${esc(u.phone||'')}</div>
+      ${photos}
+      <div class="actions">
+        <button class="g" onclick="act('/api/dark/kyc/${u.id}/verify','Vérifié')">✅ Valider</button>
+        <button class="r" onclick="act('/api/dark/kyc/${u.id}/reject','Rejeté')">✕ Rejeter</button>
+      </div></div>`;
+  }).join('');
+}
+
+function renderCreators(d) {
+  const items = d.requests || [];
+  if (!items.length) return ($('#list').innerHTML = empty('Aucune demande créateur 🎉'), setCount(0));
+  setCount(items.length);
+  $('#list').innerHTML = items.map(u => `<div class="card">
+      <div class="big">${esc(u.username || u.id)}</div>
+      <div class="mut">${esc(u.phone||'')}</div>
+      ${u.creator_request_note?`<div class="mut">« ${esc(u.creator_request_note)} »</div>`:''}
+      <div class="actions">
+        <button class="g" onclick="act('/api/auth/creator/requests/${u.id}/approve','Approuvé')">✅ Approuver</button>
+        <button class="r" onclick="act('/api/auth/creator/requests/${u.id}/reject','Rejeté')">✕ Rejeter</button>
+      </div></div>`).join('');
+}
+
+function renderFlagged(d) {
+  const items = d.users || [];
+  if (!items.length) return ($('#list').innerHTML = empty('Aucun compte signalé 🎉'), setCount(0));
+  setCount(items.length);
+  $('#list').innerHTML = items.map(u => `<div class="card">
+      <div class="row"><div class="big">${esc(u.username || u.id)}</div>
+        <span class="badge red">${esc(u.monetization_status)}</span></div>
+      <div class="mut">${esc(u.email||'')} · retrait : ${esc(u.payout_phone||'—')}</div>
+      ${u.monetization_blocked_reason?`<div class="mut">Motif : ${esc(u.monetization_blocked_reason)}</div>`:''}
+      <div class="actions">
+        <button class="g" onclick="act('/api/monetization/${u.id}/restore','Réactivé')">✅ Réactiver</button>
+        <button class="ghost" onclick="act('/api/monetization/${u.id}/block','Bloqué')">🚫 Bloquer</button>
+      </div></div>`).join('');
+}
+
+// Auto : si une clé est déjà mémorisée, on charge
+if (key()) { $('#key').value = key(); load(); }
+</script>
+</body>
+</html>
