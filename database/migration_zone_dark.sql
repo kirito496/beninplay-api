@@ -29,6 +29,19 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS region VARCHAR(50);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_year INTEGER;
 
+-- ── Live en direct (Agora) ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS live_streams (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel TEXT NOT NULL,
+  title TEXT,
+  status VARCHAR(10) NOT NULL DEFAULT 'live', -- live | ended
+  viewers INTEGER NOT NULL DEFAULT 0,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_live_status ON live_streams(status, started_at);
+
 -- ── Anti-multi-comptes : un seul compte monétisable par personne ──────
 ALTER TABLE users ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS payout_phone TEXT;
