@@ -38,7 +38,14 @@ router.post('/withdraw', requireAuth, async (req, res) => {
   // ── Anti-multi-comptes : un seul compte monétisable par personne ──────────
   const deviceId = (req.headers['x-device-id'] || '').toString().slice(0, 64) || null;
   const { data: me } = await supabaseAdmin
-    .from('users').select('monetization_status').eq('id', req.user.id).single();
+    .from('users').select('monetization_status, kyc_status').eq('id', req.user.id).single();
+  // KYC obligatoire pour monétiser (vrai verrou "1 personne = 1 compte")
+  if (me?.kyc_status !== 'verified') {
+    return res.status(403).json({
+      success: false, code: 'kyc_required',
+      message: "Vérification d'identité requise pour retirer tes gains. Fais vérifier ta pièce (CIP).",
+    });
+  }
   if (me && me.monetization_status && me.monetization_status !== 'active') {
     return res.status(403).json({
       success: false, code: 'monetization_blocked',
