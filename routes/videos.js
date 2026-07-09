@@ -108,13 +108,8 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       return res.status(500).json({ success: false, message: `Enregistrement impossible : ${dbError.message}` });
     }
 
-    // Auto-promotion : publier sa 1re vidéo fait de toi un créateur (pour pouvoir retirer tes gains)
-    if (!req.user.is_creator) {
-      supabaseAdmin.from('users')
-        .update({ is_creator: true, became_creator_at: new Date().toISOString() })
-        .eq('id', req.user.id)
-        .then(() => {}, () => {});
-    }
+    // Publier est ouvert à tous. Le statut "créateur" (monétisation) reste
+    // une demande spéciale à valider — il n'est PAS attribué automatiquement.
 
     return res.status(201).json({
       success: true,
@@ -181,6 +176,16 @@ router.get('/', optionalAuth, async (req, res) => {
 
     // Le feed normal ne montre JAMAIS les vidéos de la Zone Dark
     if (hasZone) videos = (videos || []).filter((v) => v.zone !== 'dark');
+
+    // Feed "frais" : sur la 1re page, on mélange l'ordre pour éviter de revoir
+    // toujours la même vidéo en tête (surtout quand il y a peu de contenu).
+    // Les vidéos boostées ciblées seront ensuite replacées en tête ci-dessous.
+    if (page === 1 && !tag && !creatorId && Array.isArray(videos)) {
+      for (let i = videos.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [videos[i], videos[j]] = [videos[j], videos[i]];
+      }
+    }
 
     // ── Placement sponsorisé par hashtag : si on filtre par tag, les vidéos
     // boostées sur ce hashtag remontent en tête (triées par enchère).

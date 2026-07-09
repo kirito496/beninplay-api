@@ -29,6 +29,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS region VARCHAR(50);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_year INTEGER;
 
+-- ── Demande de statut créateur (validation manuelle par l'admin) ───────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_status VARCHAR(20) DEFAULT 'none';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_request_note TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_requested_at TIMESTAMPTZ;
+
 -- ── Paiements (système MoMo + SMS gratuit) ─────────────────────────────
 CREATE TABLE IF NOT EXISTS payments (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

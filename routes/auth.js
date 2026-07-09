@@ -268,28 +268,87 @@ router.get('/me', requireAuth, async (req, res) => {
   }
 });
 
+// Protection admin par clé secrète
+function requireAdmin(req, res, next) {
+  if (!process.env.ADMIN_KEY || req.headers['x-admin-key'] !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ success: false, message: 'Non autorisé' });
+  }
+  next();
+}
+
 /**
- * POST /api/auth/become-creator
+ * POST /api/auth/creator/apply
+ * Demande à devenir créateur de contenu (monétisation). Validée par l'admin.
  */
-router.post('/become-creator', requireAuth, async (req, res) => {
+router.post('/creator/apply', requireAuth, async (req, res) => {
   try {
     if (req.user.is_creator) {
-      return res.status(400).json({ success: false, message: 'Vous êtes déjà créateur' });
+      return res.status(400).json({ success: false, message: 'Tu es déjà créateur' });
     }
-
+    const note = (req.body?.message || '').toString().slice(0, 500);
     const { error } = await supabaseAdmin
       .from('users')
-      .update({ is_creator: true, became_creator_at: new Date().toISOString() })
+      .update({
+        creator_status: 'pending',
+        creator_request_note: note || null,
+        creator_requested_at: new Date().toISOString(),
+      })
       .eq('id', req.user.id);
 
     if (error) {
-      return res.status(500).json({ success: false, message: 'Erreur activation' });
+      return res.status(500).json({ success: false, message: `Impossible d'enregistrer la demande : ${error.message}` });
     }
-
-    return res.json({ success: true, message: 'Félicitations ! Vous êtes maintenant créateur.' });
+    return res.json({ success: true, message: 'Demande envoyée ✅ Nous l\'examinons sous 24-48 h.' });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Erreur interne' });
   }
+});
+
+/**
+ * GET /api/auth/creator/status
+ * Statut de la demande créateur de l'utilisateur.
+ */
+router.get('/creator/status', requireAuth, async (req, res) => {
+  try {
+    const { data } = await supabaseAdmin
+      .from('users').select('is_creator, creator_status').eq('id', req.user.id).single();
+    const isCreator = data?.is_creator === true;
+    return res.json({
+      success: true,
+      is_creator: isCreator,
+      status: data?.creator_status || (isCreator ? 'approved' : 'none'),
+    });
+  } catch {
+    const isCreator = req.user.is_creator === true;
+    return res.json({ success: true, is_creator: isCreator, status: isCreator ? 'approved' : 'none' });
+  }
+});
+
+/**
+ * ADMIN : lister / traiter les demandes de créateur
+ */
+router.get('/creator/requests', requireAdmin, async (req, res) => {
+  const { data } = await supabaseAdmin
+    .from('users')
+    .select('id, username, phone, creator_status, creator_request_note, creator_requested_at')
+    .eq('creator_status', 'pending')
+    .order('creator_requested_at', { ascending: true })
+    .limit(100);
+  return res.json({ success: true, count: (data || []).length, requests: data || [] });
+});
+
+router.post('/creator/requests/:id/approve', requireAdmin, async (req, res) => {
+  const { error } = await supabaseAdmin
+    .from('users')
+    .update({ is_creator: true, creator_status: 'approved', became_creator_at: new Date().toISOString() })
+    .eq('id', req.params.id);
+  if (error) return res.status(500).json({ success: false, message: error.message });
+  return res.json({ success: true, message: 'Créateur approuvé ✅' });
+});
+
+router.post('/creator/requests/:id/reject', requireAdmin, async (req, res) => {
+  await supabaseAdmin.from('users').update({ creator_status: 'rejected' }).eq('id', req.params.id);
+  return res.json({ success: true, message: 'Demande rejetée' });
 });
 
 module.exports = router;
