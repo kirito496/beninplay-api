@@ -3,6 +3,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
@@ -57,13 +58,24 @@ router.post('/:id/restore', requireAdmin, async (req, res) => {
   await supabaseAdmin.from('users')
     .update({ monetization_status: 'active', monetization_blocked_reason: null })
     .eq('id', req.params.id);
+  notify(req.params.id, {
+    type: 'monetization',
+    title: 'Monétisation réactivée ✅',
+    body: 'Ton compte peut de nouveau générer et retirer des gains.',
+  });
   return res.json({ success: true, message: 'Monétisation réactivée' });
 });
 
 router.post('/:id/block', requireAdmin, async (req, res) => {
+  const reason = req.body.reason || 'Bloqué par admin';
   await supabaseAdmin.from('users')
-    .update({ monetization_status: 'blocked', monetization_blocked_reason: (req.body.reason || 'Bloqué par admin') })
+    .update({ monetization_status: 'blocked', monetization_blocked_reason: reason })
     .eq('id', req.params.id);
+  notify(req.params.id, {
+    type: 'monetization',
+    title: 'Monétisation bloquée',
+    body: `Ta monétisation a été suspendue. Motif : ${reason}. Demande une réexamination si besoin.`,
+  });
   return res.json({ success: true, message: 'Compte bloqué' });
 });
 

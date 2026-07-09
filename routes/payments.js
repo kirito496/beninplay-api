@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { calculateRevenueSplit } = require('../services/payment');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
@@ -155,6 +156,20 @@ async function activatePurchase(payment) {
   );
   await supabaseAdmin.from('payments').update({ boost_applied: true }).eq('id', payment.id);
   console.log('[Purchase] vidéo', payment.video_id, 'achetée par', payment.user_id);
+
+  // Notifie le créateur de la vidéo
+  try {
+    const { data: v } = await supabaseAdmin
+      .from('videos').select('creator_id, title').eq('id', payment.video_id).single();
+    if (v && v.creator_id) {
+      notify(v.creator_id, {
+        type: 'purchase',
+        title: 'Vidéo achetée 🎉',
+        body: `Ta vidéo « ${v.title || 'sans titre'} » a été achetée (${payment.amount} FCFA)`,
+        data: { video_id: payment.video_id, amount: payment.amount },
+      });
+    }
+  } catch (_) { /* best-effort */ }
 }
 
 // ── Accès à un live payant (paiement confirmé) + revenu créateur ───────────────
@@ -188,6 +203,12 @@ async function activateLivePurchase(payment) {
         description: `Gain live payant (${payment.amount} FCFA)`,
         metadata: { live_id: payment.live_id, buyer: payment.user_id, gross: payment.amount },
         created_at: new Date().toISOString(), confirmed_at: new Date().toISOString(),
+      });
+      notify(live.creator_id, {
+        type: 'live_purchase',
+        title: 'Entrée à ton live payée 💰',
+        body: `Un spectateur a payé ${payment.amount} FCFA pour rejoindre ton live (+${split.creatorGross} FCFA)`,
+        data: { live_id: payment.live_id, amount: payment.amount, net: split.creatorGross },
       });
     }
   } catch (e) {

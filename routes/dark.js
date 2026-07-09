@@ -5,6 +5,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
@@ -155,11 +156,21 @@ router.get('/kyc/pending', requireAdmin, async (req, res) => {
 router.post('/kyc/:id/verify', requireAdmin, async (req, res) => {
   const { error } = await supabaseAdmin.from('users').update({ kyc_status: 'verified' }).eq('id', req.params.id);
   if (error) return res.status(500).json({ success: false, message: error.message });
+  notify(req.params.id, {
+    type: 'kyc',
+    title: 'Identité vérifiée ✅',
+    body: 'Ton identité est validée. Tu peux désormais retirer tes gains.',
+  });
   return res.json({ success: true, message: 'Identité vérifiée ✅' });
 });
 
 router.post('/kyc/:id/reject', requireAdmin, async (req, res) => {
   await supabaseAdmin.from('users').update({ kyc_status: 'rejected' }).eq('id', req.params.id);
+  notify(req.params.id, {
+    type: 'kyc',
+    title: 'Vérification refusée',
+    body: 'Ta pièce n\'a pas pu être validée. Renvoie des photos nettes et lisibles.',
+  });
   return res.json({ success: true, message: 'Vérification rejetée' });
 });
 

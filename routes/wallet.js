@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { calculateRevenueSplit, MIN_WITHDRAWAL } = require('../services/payment');
+const { notify } = require('../services/notify');
 const router = express.Router();
 
 // Protection des routes admin par une clé secrète (variable d'env ADMIN_KEY).
@@ -126,6 +127,12 @@ router.post('/admin/withdrawals/:id/complete', requireAdmin, async (req, res) =>
   if (tx.status === 'completed') return res.json({ success: true, message: 'Déjà payé' });
   if (!['pending', 'processing'].includes(tx.status)) return res.status(400).json({ success: false, message: `Statut « ${tx.status} » non payable` });
   await supabaseAdmin.from('transactions').update({ status: 'completed', confirmed_at: new Date().toISOString() }).eq('id', tx.id);
+  notify(tx.user_id, {
+    type: 'withdrawal',
+    title: 'Retrait payé ✅',
+    body: `Ton retrait de ${tx.net_amount || tx.amount} FCFA a été envoyé sur ton Mobile Money`,
+    data: { transaction_id: tx.id, amount: tx.amount },
+  });
   return res.json({ success: true, message: 'Retrait marqué comme payé ✅' });
 });
 
@@ -137,6 +144,12 @@ router.post('/admin/withdrawals/:id/reject', requireAdmin, async (req, res) => {
   if (tx.status === 'completed') return res.status(400).json({ success: false, message: 'Déjà payé, non remboursable' });
   await supabaseAdmin.rpc('increment_wallet_balance', { user_id: tx.user_id, amount: tx.amount });
   await supabaseAdmin.from('transactions').update({ status: 'cancelled' }).eq('id', tx.id);
+  notify(tx.user_id, {
+    type: 'withdrawal',
+    title: 'Retrait refusé',
+    body: `Ton retrait de ${tx.amount} FCFA a été refusé et ton solde a été remboursé.`,
+    data: { transaction_id: tx.id, amount: tx.amount },
+  });
   return res.json({ success: true, message: 'Retrait rejeté, solde remboursé' });
 });
 

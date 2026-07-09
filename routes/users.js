@@ -3,6 +3,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
@@ -144,6 +145,18 @@ router.post('/:id/follow', requireAuth, async (req, res) => {
         created_at: new Date().toISOString(),
       });
       following = true;
+
+      // Notifie la personne suivie
+      const { data: me } = await supabaseAdmin
+        .from('users').select('username').eq('id', req.user.id).single();
+      const who = me?.username || 'Quelqu\'un';
+      notify(id, {
+        type: 'follow',
+        title: 'Nouvel abonné',
+        body: `@${who} a commencé à te suivre`,
+        actorId: req.user.id,
+        data: { follower_id: req.user.id },
+      });
     }
 
     return res.json({ success: true, following });

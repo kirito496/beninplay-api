@@ -183,3 +183,17 @@ CREATE TABLE IF NOT EXISTS live_purchases (
   UNIQUE(live_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_live_purchases_user ON live_purchases(user_id);
+
+-- ── Notifications (centre de notifs in-app, sans push payant) ──────────
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- destinataire
+  type VARCHAR(30) NOT NULL,          -- follow|purchase|live_purchase|withdrawal|kyc|creator|monetization
+  title TEXT NOT NULL,
+  body TEXT,
+  data JSONB DEFAULT '{}',            -- infos libres (ids, montants…)
+  actor_id UUID REFERENCES users(id) ON DELETE SET NULL, -- qui a déclenché (optionnel)
+  read BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read, created_at DESC);

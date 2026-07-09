@@ -7,6 +7,7 @@ const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { getClientIp, geoFromIp, BENIN_REGIONS } = require('../services/geo');
 const { sendVerificationCode } = require('../services/email');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
@@ -455,11 +456,21 @@ router.post('/creator/requests/:id/approve', requireAdmin, async (req, res) => {
     .update({ is_creator: true, creator_status: 'approved', became_creator_at: new Date().toISOString() })
     .eq('id', req.params.id);
   if (error) return res.status(500).json({ success: false, message: error.message });
+  notify(req.params.id, {
+    type: 'creator',
+    title: 'Tu es créateur ⭐',
+    body: 'Ta demande est acceptée. Tu peux maintenant publier et monétiser tes contenus.',
+  });
   return res.json({ success: true, message: 'Créateur approuvé ✅' });
 });
 
 router.post('/creator/requests/:id/reject', requireAdmin, async (req, res) => {
   await supabaseAdmin.from('users').update({ creator_status: 'rejected' }).eq('id', req.params.id);
+  notify(req.params.id, {
+    type: 'creator',
+    title: 'Demande créateur refusée',
+    body: 'Ta demande pour devenir créateur n\'a pas été retenue pour le moment.',
+  });
   return res.json({ success: true, message: 'Demande rejetée' });
 });
 
