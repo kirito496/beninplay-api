@@ -710,6 +710,30 @@ router.post('/:id/view', optionalAuth, async (req, res) => {
 });
 
 /**
+ * POST /api/videos/:id/complete
+ * Marque que ce spectateur a regardé la vidéo jusqu'au bout (signal d'impact,
+ * même pour les non-abonnés). Sert au classement des créateurs.
+ */
+router.post('/:id/complete', optionalAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const deviceId = (req.headers['x-device-id'] || req.body?.device_id || '').toString().slice(0, 64);
+    const viewerKey = req.user?.id
+      ? `u:${req.user.id}`
+      : (deviceId ? `d:${deviceId}` : `ip:${getClientIp(req)}`);
+
+    // Upsert : crée la vue si besoin, et la marque "completed"
+    await supabaseAdmin
+      .from('video_views')
+      .upsert({ video_id: id, viewer_key: viewerKey, completed: true }, { onConflict: 'video_id,viewer_key' });
+
+    return res.json({ success: true });
+  } catch (err) {
+    return res.json({ success: true }); // jamais bloquant
+  }
+});
+
+/**
  * GET /api/videos/:id
  * Récupère une vidéo par son ID et incrémente les vues
  */

@@ -7,6 +7,53 @@ const { requireAuth, optionalAuth } = require('../middleware/auth');
 const router = express.Router();
 
 /**
+ * GET /api/users/leaderboard?limit=50
+ * Classement des créateurs par score d'impact (vues complétées incluses).
+ */
+router.get('/leaderboard', optionalAuth, async (req, res) => {
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '50', 10)));
+  try {
+    // Voie rapide : fonction SQL agrégée
+    const { data, error } = await supabaseAdmin.rpc('creator_leaderboard', { limit_n: limit });
+    if (!error && Array.isArray(data)) {
+      const ranked = data.map((r, i) => ({ rank: i + 1, ...r }));
+      return res.json({ success: true, creators: ranked });
+    }
+    throw error || new Error('rpc indisponible');
+  } catch (_) {
+    // Repli : agrégation simple côté serveur (sans vues complétées ni abonnés)
+    try {
+      const { data: vids } = await supabaseAdmin
+        .from('videos')
+        .select('creator_id, views, likes_count, comments_count, creator:users!creator_id(id, username, avatar_url, is_creator)')
+        .eq('status', 'published')
+        .limit(2000);
+      const acc = {};
+      for (const v of vids || []) {
+        if (!v.creator || v.creator.is_creator !== true) continue;
+        const id = v.creator_id;
+        acc[id] = acc[id] || {
+          creator_id: id, username: v.creator.username, avatar_url: v.creator.avatar_url,
+          videos_count: 0, total_views: 0, completed_views: 0, likes: 0, comments: 0, followers: 0,
+        };
+        acc[id].videos_count += 1;
+        acc[id].total_views += v.views || 0;
+        acc[id].likes += v.likes_count || 0;
+        acc[id].comments += v.comments_count || 0;
+      }
+      const ranked = Object.values(acc)
+        .map((c) => ({ ...c, score: c.likes * 3 + c.comments * 4 + c.total_views }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map((c, i) => ({ rank: i + 1, ...c }));
+      return res.json({ success: true, creators: ranked });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+});
+
+/**
  * GET /api/users/:id
  * Profil public d'un créateur + compteurs + si je le suis
  */

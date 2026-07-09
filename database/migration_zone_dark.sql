@@ -92,3 +92,52 @@ CREATE TABLE IF NOT EXISTS video_purchases (
   UNIQUE(video_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_video_purchases_user ON video_purchases(user_id);
+
+-- ── Classement des créateurs : vues "complétées" (regardées jusqu'au bout) ──
+ALTER TABLE video_views ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT false;
+
+-- Score d'impact agrégé par créateur (inclut les non-abonnés qui vont au bout)
+CREATE OR REPLACE FUNCTION creator_leaderboard(limit_n INTEGER DEFAULT 50)
+RETURNS TABLE(
+  creator_id UUID, username TEXT, avatar_url TEXT,
+  videos_count BIGINT, total_views BIGINT, completed_views BIGINT,
+  likes BIGINT, comments BIGINT, followers BIGINT, score NUMERIC
+) LANGUAGE sql STABLE AS $$
+  WITH vids AS (
+    SELECT creator_id,
+           COUNT(*) AS videos_count,
+           COALESCE(SUM(views),0) AS total_views,
+           COALESCE(SUM(likes_count),0) AS likes,
+           COALESCE(SUM(comments_count),0) AS comments
+    FROM videos WHERE status = 'published' GROUP BY creator_id
+  ),
+  comp AS (
+    SELECT v.creator_id, COUNT(*) AS completed_views
+    FROM video_views vv JOIN videos v ON v.id = vv.video_id
+    WHERE vv.completed = true
+    GROUP BY v.creator_id
+  ),
+  fol AS (
+    SELECT following_id AS creator_id, COUNT(*) AS followers
+    FROM follows GROUP BY following_id
+  )
+  SELECT u.id, u.username, u.avatar_url,
+    COALESCE(vids.videos_count, 0),
+    COALESCE(vids.total_views, 0),
+    COALESCE(comp.completed_views, 0),
+    COALESCE(vids.likes, 0),
+    COALESCE(vids.comments, 0),
+    COALESCE(fol.followers, 0),
+    (COALESCE(comp.completed_views,0) * 5
+     + COALESCE(vids.likes,0) * 3
+     + COALESCE(vids.comments,0) * 4
+     + COALESCE(fol.followers,0) * 2
+     + COALESCE(vids.total_views,0) * 1)::numeric AS score
+  FROM users u
+  JOIN vids ON vids.creator_id = u.id
+  LEFT JOIN comp ON comp.creator_id = u.id
+  LEFT JOIN fol ON fol.creator_id = u.id
+  WHERE u.is_creator = true
+  ORDER BY score DESC
+  LIMIT limit_n;
+$$;
