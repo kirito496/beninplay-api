@@ -9,6 +9,35 @@ const { getClientIp } = require('../services/geo');
 
 const router = express.Router();
 
+// ── Vente à l'unité : charge les prix + les achats du spectateur ──────────────
+// Best-effort : si la colonne price / la table video_purchases n'existent pas
+// encore (avant migration), tout est considéré comme gratuit.
+async function loadPaywall(videos, userId) {
+  const out = { priceMap: {}, purchasedIds: new Set() };
+  if (!videos || videos.length === 0) return out;
+  const ids = videos.map((v) => v.id);
+  try {
+    const { data: pr } = await supabaseAdmin.from('videos').select('id, price').in('id', ids);
+    if (pr) for (const r of pr) out.priceMap[r.id] = r.price || 0;
+  } catch (_) { /* colonne price absente */ }
+  if (userId) {
+    try {
+      const { data: pu } = await supabaseAdmin
+        .from('video_purchases').select('video_id').eq('user_id', userId).in('video_id', ids);
+      if (pu) out.purchasedIds = new Set(pu.map((p) => p.video_id));
+    } catch (_) { /* table absente */ }
+  }
+  return out;
+}
+
+// Renvoie {price, is_locked, video_url} : masque l'URL si vidéo payante non achetée
+function lockFields(v, priceMap, purchasedIds, userId) {
+  const price = priceMap[v.id] || 0;
+  const isOwner = userId && v.creator && v.creator.id === userId;
+  const locked = price > 0 && !isOwner && !purchasedIds.has(v.id);
+  return { price, is_locked: locked, video_url: locked ? null : v.video_url };
+}
+
 // Configuration multer - stockage en mémoire puis upload vers Supabase Storage
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -99,8 +128,9 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       }
     }
 
-    // + zone (colonne optionnelle : présente après la migration)
-    const withZone = { ...videoData, zone: zone === 'dark' ? 'dark' : 'normal' };
+    // + zone et prix (colonnes optionnelles : présentes après la migration)
+    const priceVal = Math.max(0, parseInt(req.body.price, 10) || 0);
+    const withZone = { ...videoData, zone: zone === 'dark' ? 'dark' : 'normal', price: priceVal };
 
     let { data: video, error: dbError } = await supabaseAdmin
       .from('videos').insert(withZone).select().single();
@@ -299,8 +329,10 @@ router.get('/', optionalAuth, async (req, res) => {
     }
 
     const nowMs = Date.now();
+    const { priceMap, purchasedIds } = await loadPaywall(videos, req.user?.id);
     const enrichedVideos = videos.map((v) => ({
       ...v,
+      ...lockFields(v, priceMap, purchasedIds, req.user?.id),
       creator_name: v.creator?.username || 'Créateur',
       creator_avatar: v.creator?.avatar_url || null,
       is_liked: likedVideoIds.has(v.id),
@@ -511,14 +543,15 @@ router.get('/following', requireAuth, async (req, res) => {
       if (likes) likedIds = new Set(likes.map((l) => l.video_id));
     }
 
-    const enriched = (videos || [])
-      .filter((v) => v.zone !== 'dark') // le feed Abonnements normal exclut le Dark
-      .map((v) => ({
-        ...v,
-        creator_name: v.creator?.username || 'Créateur',
-        creator_avatar: v.creator?.avatar_url || null,
-        is_liked: likedIds.has(v.id),
-      }));
+    const visible = (videos || []).filter((v) => v.zone !== 'dark');
+    const { priceMap, purchasedIds } = await loadPaywall(visible, req.user.id);
+    const enriched = visible.map((v) => ({
+      ...v,
+      ...lockFields(v, priceMap, purchasedIds, req.user.id),
+      creator_name: v.creator?.username || 'Créateur',
+      creator_avatar: v.creator?.avatar_url || null,
+      is_liked: likedIds.has(v.id),
+    }));
 
     return res.json({ success: true, videos: enriched });
   } catch (err) {
@@ -585,8 +618,10 @@ router.get('/dark', requireAuth, async (req, res) => {
       if (likes) likedIds = new Set(likes.map((l) => l.video_id));
     }
 
+    const { priceMap, purchasedIds } = await loadPaywall(videos, req.user.id);
     const enriched = videos.map((v) => ({
       ...v,
+      ...lockFields(v, priceMap, purchasedIds, req.user.id),
       creator_name: v.creator?.username || 'Créateur',
       creator_avatar: v.creator?.avatar_url || null,
       is_liked: likedIds.has(v.id),
@@ -711,7 +746,12 @@ router.get('/:id', optionalAuth, async (req, res) => {
       isLiked = !!like;
     }
 
-    return res.json({ success: true, video: { ...video, is_liked: isLiked } });
+    // Verrou vente à l'unité
+    const { priceMap, purchasedIds } = await loadPaywall([video], req.user?.id);
+    return res.json({
+      success: true,
+      video: { ...video, ...lockFields(video, priceMap, purchasedIds, req.user?.id), is_liked: isLiked },
+    });
   } catch (err) {
     console.error('[Videos] get erreur:', err.message);
     return res.status(500).json({ success: false, message: 'Erreur interne' });
@@ -981,6 +1021,27 @@ router.post('/register', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[Videos] register erreur:', err.message);
     return res.status(500).json({ success: false, message: err.message || 'Erreur interne' });
+  }
+});
+
+/**
+ * PATCH /api/videos/:id/price
+ * Le créateur fixe/modifie le prix de vente à l'unité (0 = gratuit).
+ */
+router.patch('/:id/price', requireAuth, async (req, res) => {
+  try {
+    const price = Math.max(0, parseInt(req.body.price, 10) || 0);
+    const { data: video } = await supabaseAdmin
+      .from('videos').select('id, creator_id').eq('id', req.params.id).single();
+    if (!video) return res.status(404).json({ success: false, message: 'Vidéo introuvable' });
+    if (video.creator_id !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Seul le créateur peut changer le prix' });
+    }
+    const { error } = await supabaseAdmin.from('videos').update({ price }).eq('id', req.params.id);
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    return res.json({ success: true, message: price > 0 ? `Prix fixé à ${price} FCFA` : 'Vidéo gratuite', price });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
   }
 });
 

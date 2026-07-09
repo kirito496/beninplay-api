@@ -79,3 +79,16 @@ CREATE TABLE IF NOT EXISTS video_views (
 );
 CREATE INDEX IF NOT EXISTS idx_video_views_video ON video_views(video_id);
 CREATE INDEX IF NOT EXISTS idx_video_views_time ON video_views(video_id, created_at);
+
+-- ── Vente de vidéos à l'unité (pay-per-view) ───────────────────────────
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS price INTEGER NOT NULL DEFAULT 0; -- 0 = gratuit
+
+CREATE TABLE IF NOT EXISTS video_purchases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  video_id UUID NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(video_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_video_purchases_user ON video_purchases(user_id);

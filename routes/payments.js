@@ -139,6 +139,23 @@ async function activateDarkSub(payment) {
   console.log('[DarkSub] activé', payment.user_id, '+', days, 'j →', until);
 }
 
+// ── Enregistre l'achat d'une vidéo à l'unité (paiement confirmé) ───────────────
+async function activatePurchase(payment) {
+  if (!payment || payment.type !== 'video' || !payment.video_id) return;
+  if (payment.boost_applied === true) return; // idempotence
+  await supabaseAdmin.from('video_purchases').upsert(
+    {
+      video_id: payment.video_id,
+      user_id: payment.user_id,
+      amount: payment.amount || 0,
+      created_at: new Date().toISOString(),
+    },
+    { onConflict: 'video_id,user_id' }
+  );
+  await supabaseAdmin.from('payments').update({ boost_applied: true }).eq('id', payment.id);
+  console.log('[Purchase] vidéo', payment.video_id, 'achetée par', payment.user_id);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 /**
@@ -281,6 +298,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       try { await activateBoost(payment); } catch (_) {}
     } else if (payment.status === 'confirmed' && payment.type === 'dark_sub') {
       try { await activateDarkSub(payment); } catch (_) {}
+    } else if (payment.status === 'confirmed' && payment.type === 'video') {
+      try { await activatePurchase(payment); } catch (_) {}
     }
 
     return res.json({
@@ -372,6 +391,8 @@ router.post('/sms', async (req, res) => {
       await activateBoost(payment);
     } else if (payment.type === 'dark_sub') {
       await activateDarkSub(payment);
+    } else if (payment.type === 'video') {
+      await activatePurchase(payment);
     }
 
     console.log('[SMS] Paiement', payment.id, 'confirmé !');
