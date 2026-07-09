@@ -26,6 +26,7 @@ const darkRoutes = require('./routes/dark');
 const monetizationRoutes = require('./routes/monetization');
 const liveRoutes = require('./routes/live');
 const notificationsRoutes = require('./routes/notifications');
+const shareRoutes = require('./routes/share');
 
 // WebSocket
 const { initWebSocketServer } = require('./websocket/chat');
@@ -96,6 +97,7 @@ app.use('/api/dark', darkRoutes);
 app.use('/api/monetization', monetizationRoutes);
 app.use('/api/live', liveRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/v', shareRoutes);
 
 // ============================================================
 // Gestion des erreurs globale
