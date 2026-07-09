@@ -219,6 +219,24 @@ async function activateLivePurchase(payment) {
   console.log('[LivePurchase] live', payment.live_id, 'acheté par', payment.user_id);
 }
 
+// ── Achat de pièces (coins) confirmé → crédite le solde de pièces ──────────────
+async function activateCoins(payment) {
+  if (!payment || payment.type !== 'coins') return;
+  if (payment.boost_applied === true) return; // idempotence
+  const coins = payment.coins || 0;
+  if (coins > 0) {
+    await supabaseAdmin.rpc('add_coins', { p_user: payment.user_id, p_amount: coins });
+  }
+  await supabaseAdmin.from('payments').update({ boost_applied: true }).eq('id', payment.id);
+  console.log('[Coins]', coins, 'pièces créditées à', payment.user_id);
+  notify(payment.user_id, {
+    type: 'monetization',
+    title: 'Pièces ajoutées 🪙',
+    body: `${coins} pièces ont été ajoutées à ton solde.`,
+    data: { coins },
+  });
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 /**
@@ -228,7 +246,7 @@ async function activateLivePurchase(payment) {
 router.post('/initiate', requireAuth, async (req, res) => {
   try {
     const {
-      amount, type, videoId, liveId, operator,
+      amount, type, videoId, liveId, coins, operator,
       targetRegion, targetRegions, targetGender, targetAgeMin, targetAgeMax, boostDays, targetTags,
     } = req.body;
 
@@ -292,6 +310,7 @@ router.post('/initiate', requireAuth, async (req, res) => {
         user_id: req.user.id,
         video_id: videoId || null,
         live_id: (type === 'live') ? (liveId || null) : null,
+        coins: (type === 'coins') ? (parseInt(coins, 10) || 0) : 0,
         amount: payAmount,         // montant exact à payer (unique)
         operator,
         type: type || 'boost',
@@ -366,6 +385,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       try { await activatePurchase(payment); } catch (_) {}
     } else if (payment.status === 'confirmed' && payment.type === 'live') {
       try { await activateLivePurchase(payment); } catch (_) {}
+    } else if (payment.status === 'confirmed' && payment.type === 'coins') {
+      try { await activateCoins(payment); } catch (_) {}
     }
 
     return res.json({
@@ -461,6 +482,8 @@ router.post('/sms', async (req, res) => {
       await activatePurchase(payment);
     } else if (payment.type === 'live') {
       await activateLivePurchase(payment);
+    } else if (payment.type === 'coins') {
+      await activateCoins(payment);
     }
 
     console.log('[SMS] Paiement', payment.id, 'confirmé !');

@@ -197,3 +197,37 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read, created_at DESC);
+
+-- ── Pièces (monnaie interne) + cadeaux/stickers en live ───────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coin_balance INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 0; -- pièces à créditer (achat de pièces)
+
+CREATE TABLE IF NOT EXISTS live_gifts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  live_id UUID REFERENCES live_streams(id) ON DELETE SET NULL,
+  sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  gift_key VARCHAR(30) NOT NULL,
+  coins INTEGER NOT NULL,        -- coût en pièces
+  amount_fcfa INTEGER NOT NULL,  -- valeur brute FCFA
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_live_gifts_creator ON live_gifts(creator_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_live_gifts_live ON live_gifts(live_id);
+
+-- Ajoute des pièces (achat confirmé)
+CREATE OR REPLACE FUNCTION add_coins(p_user UUID, p_amount INTEGER)
+RETURNS void LANGUAGE sql AS $$
+  UPDATE users SET coin_balance = coin_balance + p_amount WHERE id = p_user;
+$$;
+
+-- Débite des pièces de façon atomique : ne réussit que si le solde suffit
+CREATE OR REPLACE FUNCTION spend_coins(p_user UUID, p_amount INTEGER)
+RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+DECLARE affected INTEGER;
+BEGIN
+  UPDATE users SET coin_balance = coin_balance - p_amount
+   WHERE id = p_user AND coin_balance >= p_amount;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  RETURN affected > 0;
+END; $$;
