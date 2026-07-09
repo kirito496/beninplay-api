@@ -35,6 +35,41 @@ router.post('/withdraw', requireAuth, async (req, res) => {
   const cleanPhone = String(phone || '').replace(/\s/g, '');
   if (cleanPhone.length < 8) return res.status(400).json({ success: false, message: 'Numéro Mobile Money invalide' });
 
+  // ── Anti-multi-comptes : un seul compte monétisable par personne ──────────
+  const deviceId = (req.headers['x-device-id'] || '').toString().slice(0, 64) || null;
+  const { data: me } = await supabaseAdmin
+    .from('users').select('monetization_status').eq('id', req.user.id).single();
+  if (me && me.monetization_status && me.monetization_status !== 'active') {
+    return res.status(403).json({
+      success: false, code: 'monetization_blocked',
+      message: me.monetization_status === 'review'
+        ? 'Réexamination en cours. Tu seras notifié dès qu\'elle est traitée.'
+        : 'Compte bloqué (plusieurs comptes détectés). Demande une réexamination.',
+    });
+  }
+  // Cherche un autre compte lié (même numéro de retrait ou même appareil)
+  const orParts = [`payout_phone.eq.${cleanPhone}`];
+  if (deviceId) orParts.push(`device_id.eq.${deviceId}`);
+  const { data: siblings } = await supabaseAdmin
+    .from('users').select('id').or(orParts.join(',')).neq('id', req.user.id).limit(1);
+  if (siblings && siblings.length > 0) {
+    const reason = 'Plusieurs comptes détectés (même numéro de retrait ou même appareil)';
+    await supabaseAdmin.from('users')
+      .update({ monetization_status: 'blocked', monetization_blocked_reason: reason })
+      .eq('id', req.user.id);
+    await supabaseAdmin.from('users')
+      .update({ monetization_status: 'blocked', monetization_blocked_reason: reason })
+      .or(orParts.join(',')).neq('id', req.user.id);
+    return res.status(403).json({
+      success: false, code: 'monetization_blocked',
+      message: 'Un autre compte utilise ce numéro ou cet appareil. La monétisation est bloquée. Demande une réexamination.',
+    });
+  }
+  // Mémorise l'empreinte de ce compte (numéro de retrait + appareil)
+  await supabaseAdmin.from('users')
+    .update({ payout_phone: cleanPhone, ...(deviceId ? { device_id: deviceId } : {}) })
+    .eq('id', req.user.id);
+
   const split = calculateRevenueSplit(a);
   const { data: u } = await supabaseAdmin.from('users').select('wallet_balance').eq('id', req.user.id).single();
   if (!u || u.wallet_balance < a) return res.status(400).json({ success: false, message: `Solde insuffisant (${u?.wallet_balance || 0} FCFA)` });

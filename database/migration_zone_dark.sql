@@ -29,6 +29,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS region VARCHAR(50);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_year INTEGER;
 
+-- ── Anti-multi-comptes : un seul compte monétisable par personne ──────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS device_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS payout_phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS monetization_status VARCHAR(20) NOT NULL DEFAULT 'active'; -- active|blocked|review
+ALTER TABLE users ADD COLUMN IF NOT EXISTS monetization_blocked_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_users_device ON users(device_id) WHERE device_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_payout ON users(payout_phone) WHERE payout_phone IS NOT NULL;
+
 -- ── Auth par email (Brevo) : un seul compte par email ─────────────────
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
