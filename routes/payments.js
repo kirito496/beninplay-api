@@ -4,6 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
+const { calculateRevenueSplit } = require('../services/payment');
 
 const router = express.Router();
 
@@ -156,6 +157,47 @@ async function activatePurchase(payment) {
   console.log('[Purchase] vidéo', payment.video_id, 'achetée par', payment.user_id);
 }
 
+// ── Accès à un live payant (paiement confirmé) + revenu créateur ───────────────
+async function activateLivePurchase(payment) {
+  if (!payment || payment.type !== 'live' || !payment.live_id) return;
+  if (payment.boost_applied === true) return; // idempotence
+
+  // 1) Débloque l'accès du spectateur à ce live
+  await supabaseAdmin.from('live_purchases').upsert(
+    {
+      live_id: payment.live_id,
+      user_id: payment.user_id,
+      amount: payment.amount || 0,
+      created_at: new Date().toISOString(),
+    },
+    { onConflict: 'live_id,user_id' }
+  );
+
+  // 2) Crédite le créateur du live (part nette après commission plateforme)
+  try {
+    const { data: live } = await supabaseAdmin
+      .from('live_streams').select('creator_id').eq('id', payment.live_id).single();
+    if (live && live.creator_id) {
+      const split = calculateRevenueSplit(payment.amount || 0);
+      await supabaseAdmin.rpc('increment_wallet_balance', {
+        user_id: live.creator_id, amount: split.creatorGross,
+      });
+      await supabaseAdmin.from('transactions').insert({
+        id: uuidv4(), user_id: live.creator_id, type: 'earning',
+        amount: split.creatorGross, net_amount: split.creatorGross, status: 'completed',
+        description: `Gain live payant (${payment.amount} FCFA)`,
+        metadata: { live_id: payment.live_id, buyer: payment.user_id, gross: payment.amount },
+        created_at: new Date().toISOString(), confirmed_at: new Date().toISOString(),
+      });
+    }
+  } catch (e) {
+    console.error('[LivePurchase] crédit créateur échoué:', e.message);
+  }
+
+  await supabaseAdmin.from('payments').update({ boost_applied: true }).eq('id', payment.id);
+  console.log('[LivePurchase] live', payment.live_id, 'acheté par', payment.user_id);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 /**
@@ -165,7 +207,7 @@ async function activatePurchase(payment) {
 router.post('/initiate', requireAuth, async (req, res) => {
   try {
     const {
-      amount, type, videoId, operator,
+      amount, type, videoId, liveId, operator,
       targetRegion, targetRegions, targetGender, targetAgeMin, targetAgeMax, boostDays, targetTags,
     } = req.body;
 
@@ -228,6 +270,7 @@ router.post('/initiate', requireAuth, async (req, res) => {
         id: uuidv4(),
         user_id: req.user.id,
         video_id: videoId || null,
+        live_id: (type === 'live') ? (liveId || null) : null,
         amount: payAmount,         // montant exact à payer (unique)
         operator,
         type: type || 'boost',
@@ -300,6 +343,8 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       try { await activateDarkSub(payment); } catch (_) {}
     } else if (payment.status === 'confirmed' && payment.type === 'video') {
       try { await activatePurchase(payment); } catch (_) {}
+    } else if (payment.status === 'confirmed' && payment.type === 'live') {
+      try { await activateLivePurchase(payment); } catch (_) {}
     }
 
     return res.json({
@@ -393,6 +438,8 @@ router.post('/sms', async (req, res) => {
       await activateDarkSub(payment);
     } else if (payment.type === 'video') {
       await activatePurchase(payment);
+    } else if (payment.type === 'live') {
+      await activateLivePurchase(payment);
     }
 
     console.log('[SMS] Paiement', payment.id, 'confirmé !');

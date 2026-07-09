@@ -168,3 +168,18 @@ RETURNS TABLE(
   ORDER BY score DESC
   LIMIT limit_n;
 $$;
+
+-- ── Live payant / privé : prix + accès payant + achats ────────────────
+-- (placé en fin de fichier : live_streams et payments existent déjà plus haut)
+ALTER TABLE live_streams ADD COLUMN IF NOT EXISTS price INTEGER NOT NULL DEFAULT 0; -- 0 = gratuit
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS live_id UUID REFERENCES live_streams(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS live_purchases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  live_id UUID NOT NULL REFERENCES live_streams(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(live_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_live_purchases_user ON live_purchases(user_id);
