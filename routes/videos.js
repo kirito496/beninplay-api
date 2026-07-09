@@ -663,6 +663,84 @@ router.get('/popular-tags', async (req, res) => {
   }
 });
 
+// Colonnes standard d'une vidéo (avec / sans zone selon l'état de la migration)
+const VIDEO_SELECT = `
+  id, title, description, video_url, thumbnail_url, tags, zone,
+  views, likes_count, comments_count, shares_count, created_at,
+  creator:users!creator_id(id, username, avatar_url, is_creator)`;
+const VIDEO_SELECT_NOZONE = VIDEO_SELECT.replace(', zone', '');
+
+// Enrichit une liste de vidéos (paywall + noms créateur) comme le feed principal
+async function enrichVideos(videos, userId) {
+  const { priceMap, purchasedIds } = await loadPaywall(videos, userId);
+  return videos.map((v) => ({
+    ...v,
+    ...lockFields(v, priceMap, purchasedIds, userId),
+    creator_name: v.creator?.username || 'Créateur',
+    creator_avatar: v.creator?.avatar_url || null,
+  }));
+}
+
+/**
+ * GET /api/videos/search?q=... — recherche par titre ou hashtag (hors Dark)
+ */
+router.get('/search', optionalAuth, async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim().toLowerCase().slice(0, 60);
+    if (q.length < 2) return res.json({ success: true, videos: [] });
+    const safe = q.replace(/[%_]/g, ''); // neutralise les jokers ilike
+
+    let hasZone = true;
+    let { data: videos, error } = await supabaseAdmin.from('videos').select(VIDEO_SELECT)
+      .eq('status', 'published').ilike('title', `%${safe}%`)
+      .order('views', { ascending: false }).limit(30);
+    if (error) {
+      hasZone = false;
+      ({ data: videos } = await supabaseAdmin.from('videos').select(VIDEO_SELECT_NOZONE)
+        .eq('status', 'published').ilike('title', `%${safe}%`)
+        .order('views', { ascending: false }).limit(30));
+    }
+    videos = videos || [];
+
+    // Ajoute les vidéos qui portent ce hashtag
+    try {
+      const { data: byTag } = await supabaseAdmin.from('videos')
+        .select(hasZone ? VIDEO_SELECT : VIDEO_SELECT_NOZONE)
+        .eq('status', 'published').contains('tags', [q]).limit(30);
+      if (byTag) {
+        const seen = new Set(videos.map((v) => v.id));
+        for (const v of byTag) if (!seen.has(v.id)) { videos.push(v); seen.add(v.id); }
+      }
+    } catch (_) { /* colonne tags absente : ignoré */ }
+
+    if (hasZone) videos = videos.filter((v) => v.zone !== 'dark');
+    return res.json({ success: true, videos: await enrichVideos(videos, req.user?.id) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+/**
+ * GET /api/videos/trending — vidéos les plus vues (hors Dark)
+ */
+router.get('/trending', optionalAuth, async (req, res) => {
+  try {
+    let hasZone = true;
+    let { data: videos, error } = await supabaseAdmin.from('videos').select(VIDEO_SELECT)
+      .eq('status', 'published').order('views', { ascending: false }).limit(30);
+    if (error) {
+      hasZone = false;
+      ({ data: videos } = await supabaseAdmin.from('videos').select(VIDEO_SELECT_NOZONE)
+        .eq('status', 'published').order('views', { ascending: false }).limit(30));
+    }
+    videos = videos || [];
+    if (hasZone) videos = videos.filter((v) => v.zone !== 'dark');
+    return res.json({ success: true, videos: await enrichVideos(videos, req.user?.id) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
 /**
  * POST /api/videos/:id/view
  * Enregistre une vue (appelé par le feed quand une vidéo est regardée).

@@ -55,6 +55,42 @@ router.get('/leaderboard', optionalAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/users/search?q=... — recherche de créateurs/utilisateurs par pseudo
+ */
+router.get('/search', optionalAuth, async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim().toLowerCase().slice(0, 40);
+    if (q.length < 2) return res.json({ success: true, users: [] });
+    const safe = q.replace(/[%_]/g, '');
+
+    const { data: users } = await supabaseAdmin
+      .from('users')
+      .select('id, username, avatar_url, is_creator, bio')
+      .ilike('username', `%${safe}%`)
+      .limit(30);
+
+    // Ajoute le nombre d'abonnés pour chaque résultat (léger, best-effort)
+    const out = [];
+    for (const u of users || []) {
+      let followers = 0;
+      try {
+        const { count } = await supabaseAdmin
+          .from('follows').select('*', { count: 'exact', head: true }).eq('following_id', u.id);
+        followers = count || 0;
+      } catch (_) { /* ignore */ }
+      out.push({ ...u, followers_count: followers });
+    }
+    // Créateurs d'abord, puis par nombre d'abonnés
+    out.sort((a, b) => (b.is_creator === true ? 1 : 0) - (a.is_creator === true ? 1 : 0)
+      || b.followers_count - a.followers_count);
+
+    return res.json({ success: true, users: out });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+/**
  * GET /api/users/:id
  * Profil public d'un créateur + compteurs + si je le suis
  */
