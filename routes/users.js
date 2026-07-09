@@ -91,6 +91,91 @@ router.get('/search', optionalAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/users/me/stats — tableau de bord chiffré du créateur connecté
+ */
+router.get('/me/stats', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+
+    // Mes vidéos (agrégats + top)
+    const { data: myVideos } = await supabaseAdmin
+      .from('videos')
+      .select('id, title, thumbnail_url, views, likes_count, comments_count')
+      .eq('creator_id', uid)
+      .eq('status', 'published')
+      .order('views', { ascending: false })
+      .limit(500);
+
+    const vids = myVideos || [];
+    const totals = vids.reduce((a, v) => {
+      a.views += v.views || 0;
+      a.likes += v.likes_count || 0;
+      a.comments += v.comments_count || 0;
+      return a;
+    }, { views: 0, likes: 0, comments: 0 });
+
+    const topVideos = vids.slice(0, 5).map((v) => ({
+      id: v.id, title: v.title, thumbnail_url: v.thumbnail_url,
+      views: v.views || 0, likes_count: v.likes_count || 0,
+    }));
+
+    // Abonnés
+    let followers = 0;
+    try {
+      const { count } = await supabaseAdmin
+        .from('follows').select('*', { count: 'exact', head: true }).eq('following_id', uid);
+      followers = count || 0;
+    } catch (_) { /* ignore */ }
+
+    // Gains cumulés (transactions "earning" confirmées) + solde
+    let earningsTotal = 0;
+    try {
+      const { data: earn } = await supabaseAdmin
+        .from('transactions').select('amount').eq('user_id', uid).eq('type', 'earning');
+      earningsTotal = (earn || []).reduce((s, t) => s + (t.amount || 0), 0);
+    } catch (_) { /* table/type absent */ }
+
+    let walletBalance = 0;
+    try {
+      const { data: u } = await supabaseAdmin
+        .from('users').select('wallet_balance').eq('id', uid).single();
+      walletBalance = u?.wallet_balance || 0;
+    } catch (_) { /* ignore */ }
+
+    // Vues des 7 derniers jours (sur mes vidéos)
+    let views7d = 0;
+    try {
+      if (vids.length > 0) {
+        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count } = await supabaseAdmin
+          .from('video_views')
+          .select('*', { count: 'exact', head: true })
+          .in('video_id', vids.map((v) => v.id))
+          .gte('created_at', since);
+        views7d = count || 0;
+      }
+    } catch (_) { /* table absente */ }
+
+    return res.json({
+      success: true,
+      stats: {
+        videos: vids.length,
+        views: totals.views,
+        likes: totals.likes,
+        comments: totals.comments,
+        followers,
+        earnings_total: earningsTotal,
+        wallet_balance: walletBalance,
+        views_7d: views7d,
+        top_videos: topVideos,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+/**
  * GET /api/users/:id
  * Profil public d'un créateur + compteurs + si je le suis
  */
