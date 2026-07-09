@@ -90,6 +90,15 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       file_size: req.file.size,
       created_at: new Date().toISOString(),
     };
+    // Publier en Zone Dark exige une identité vérifiée (+18)
+    if (zone === 'dark') {
+      const { data: u } = await supabaseAdmin.from('users').select('kyc_status').eq('id', req.user.id).single();
+      if (u?.kyc_status !== 'verified') {
+        await supabaseAdmin.storage.from(bucket).remove([storagePath]).catch(() => {});
+        return res.status(403).json({ success: false, message: "Publication Dark : vérification d'identité requise" });
+      }
+    }
+
     // + zone (colonne optionnelle : présente après la migration)
     const withZone = { ...videoData, zone: zone === 'dark' ? 'dark' : 'normal' };
 
@@ -524,6 +533,25 @@ router.get('/following', requireAuth, async (req, res) => {
  */
 router.get('/dark', requireAuth, async (req, res) => {
   try {
+    // ── Contrôle d'accès : KYC vérifié + abonnement Dark actif (refus par défaut) ──
+    try {
+      const { data: u } = await supabaseAdmin
+        .from('users').select('kyc_status, dark_sub_until').eq('id', req.user.id).single();
+      const kycOk = u?.kyc_status === 'verified';
+      const subOk = u?.dark_sub_until ? new Date(u.dark_sub_until).getTime() > Date.now() : false;
+      if (!kycOk || !subOk) {
+        return res.status(403).json({
+          success: false,
+          code: 'dark_locked',
+          message: !kycOk ? "Vérification d'identité requise" : 'Abonnement Zone Dark requis',
+          kyc_status: u?.kyc_status || 'none',
+          subscribed: subOk,
+        });
+      }
+    } catch {
+      return res.status(403).json({ success: false, code: 'dark_locked', message: 'Accès Zone Dark non autorisé' });
+    }
+
     const page = Math.max(1, parseInt(req.query.page || '1', 10));
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '20', 10)));
     const offset = (page - 1) * limit;

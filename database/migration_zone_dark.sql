@@ -34,6 +34,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_status VARCHAR(20) DEFAULT 'n
 ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_request_note TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS creator_requested_at TIMESTAMPTZ;
 
+-- ── Zone Dark : vérification d'identité (KYC) + abonnement ─────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_status VARCHAR(20) DEFAULT 'none'; -- none|pending|verified|rejected
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_submitted_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_front_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_back_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS dark_sub_until TIMESTAMPTZ;
+
 -- ── Paiements (système MoMo + SMS gratuit) ─────────────────────────────
 CREATE TABLE IF NOT EXISTS payments (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

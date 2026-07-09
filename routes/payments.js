@@ -119,6 +119,26 @@ async function activateBoost(payment) {
     '- genre:', payment.target_gender, '- enchère:', payment.amount);
 }
 
+// ── Activation d'un abonnement Zone Dark (paiement confirmé) ───────────────────
+async function activateDarkSub(payment) {
+  if (!payment || payment.type !== 'dark_sub') return;
+  if (payment.boost_applied === true) return; // idempotence (on réutilise le drapeau)
+
+  const days = payment.boost_days || 30; // durée de l'abonnement (30/90/365)
+  const { data: u } = await supabaseAdmin
+    .from('users').select('dark_sub_until').eq('id', payment.user_id).single();
+
+  // Prolonge à partir de la fin actuelle si l'abonnement est encore actif
+  const now = Date.now();
+  const current = u?.dark_sub_until && new Date(u.dark_sub_until).getTime() > now
+    ? new Date(u.dark_sub_until).getTime() : now;
+  const until = new Date(current + days * 24 * 60 * 60 * 1000).toISOString();
+
+  await supabaseAdmin.from('users').update({ dark_sub_until: until }).eq('id', payment.user_id);
+  await supabaseAdmin.from('payments').update({ boost_applied: true }).eq('id', payment.id);
+  console.log('[DarkSub] activé', payment.user_id, '+', days, 'j →', until);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 /**
@@ -255,10 +275,12 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Paiement introuvable' });
     }
 
-    // Filet de sécurité : si le paiement est confirmé mais que le boost
-    // n'a pas été activé (ex: webhook raté), on l'active ici.
+    // Filet de sécurité : si le paiement est confirmé mais que la prestation
+    // n'a pas été appliquée (ex: webhook raté), on l'applique ici.
     if (payment.status === 'confirmed' && payment.type === 'boost' && payment.video_id) {
       try { await activateBoost(payment); } catch (_) {}
+    } else if (payment.status === 'confirmed' && payment.type === 'dark_sub') {
+      try { await activateDarkSub(payment); } catch (_) {}
     }
 
     return res.json({
@@ -345,9 +367,11 @@ router.post('/sms', async (req, res) => {
       })
       .eq('id', payment.id);
 
-    // Active le boost si c'est un boost
+    // Active la prestation selon le type
     if (payment.type === 'boost' && payment.video_id) {
       await activateBoost(payment);
+    } else if (payment.type === 'dark_sub') {
+      await activateDarkSub(payment);
     }
 
     console.log('[SMS] Paiement', payment.id, 'confirmé !');

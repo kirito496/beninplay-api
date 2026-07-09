@@ -21,6 +21,7 @@ const usersRoutes = require('./routes/users');
 const walletRoutes = require('./routes/wallet');
 const chatRoutes = require('./routes/chat');
 const paymentsRoutes = require('./routes/payments');
+const darkRoutes = require('./routes/dark');
 
 // WebSocket
 const { initWebSocketServer } = require('./websocket/chat');
@@ -82,6 +83,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/payments', paymentsRoutes);
+app.use('/api/dark', darkRoutes);
 
 // ============================================================
 // Gestion des erreurs globale
