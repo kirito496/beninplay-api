@@ -30,15 +30,11 @@ const upload = multer({
  */
 router.post('/upload', requireAuth, upload.single('video'), async (req, res) => {
   try {
-    if (!req.user.is_creator) {
-      return res.status(403).json({ success: false, message: 'Seuls les créateurs peuvent publier des vidéos' });
-    }
-
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Fichier vidéo requis' });
     }
 
-    const { title, description, tags, thumbnail_url } = req.body;
+    const { title, description, tags, thumbnail_url, zone } = req.body;
 
     if (!title || title.trim().length < 3) {
       return res.status(400).json({ success: false, message: 'Titre requis (minimum 3 caractères)' });
@@ -75,7 +71,7 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
         .slice(0, 10);
     }
 
-    // Enregistrer la vidéo en base
+    // Enregistrer la vidéo en base (colonnes de base garanties)
     const videoData = {
       id: videoId,
       creator_id: req.user.id,
@@ -93,18 +89,31 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       file_size: req.file.size,
       created_at: new Date().toISOString(),
     };
+    // + zone (colonne optionnelle : présente après la migration)
+    const withZone = { ...videoData, zone: zone === 'dark' ? 'dark' : 'normal' };
 
-    const { data: video, error: dbError } = await supabaseAdmin
-      .from('videos')
-      .insert(videoData)
-      .select()
-      .single();
+    let { data: video, error: dbError } = await supabaseAdmin
+      .from('videos').insert(withZone).select().single();
+
+    // Repli si la colonne "zone" n'existe pas encore
+    if (dbError && /zone|column|does not exist|schema cache/i.test(dbError.message || '')) {
+      console.warn('[Videos] upload : repli sans colonne zone —', dbError.message);
+      ({ data: video, error: dbError } = await supabaseAdmin
+        .from('videos').insert(videoData).select().single());
+    }
 
     if (dbError) {
       console.error('[Videos] Erreur insertion DB:', dbError);
-      // Nettoyer le fichier uploadé
       await supabaseAdmin.storage.from(bucket).remove([storagePath]);
-      return res.status(500).json({ success: false, message: 'Erreur lors de l\'enregistrement de la vidéo' });
+      return res.status(500).json({ success: false, message: `Enregistrement impossible : ${dbError.message}` });
+    }
+
+    // Auto-promotion : publier sa 1re vidéo fait de toi un créateur (pour pouvoir retirer tes gains)
+    if (!req.user.is_creator) {
+      supabaseAdmin.from('users')
+        .update({ is_creator: true, became_creator_at: new Date().toISOString() })
+        .eq('id', req.user.id)
+        .then(() => {}, () => {});
     }
 
     return res.status(201).json({
