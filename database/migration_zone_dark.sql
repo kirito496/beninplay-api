@@ -61,3 +61,14 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS idx_payments_pending ON payments(status, operator, amount, expires_at);
 CREATE INDEX IF NOT EXISTS idx_payments_txn ON payments(transaction_id);
+
+-- ── Vues uniques (anti-fraude boost : 1 vue par personne/vidéo) ────────
+CREATE TABLE IF NOT EXISTS video_views (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  video_id UUID NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  viewer_key VARCHAR(90) NOT NULL,   -- u:<user_id> | d:<device_id> | ip:<ip>
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(video_id, viewer_key)
+);
+CREATE INDEX IF NOT EXISTS idx_video_views_video ON video_views(video_id);
+CREATE INDEX IF NOT EXISTS idx_video_views_time ON video_views(video_id, created_at);

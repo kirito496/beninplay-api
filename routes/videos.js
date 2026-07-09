@@ -5,6 +5,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { getClientIp } = require('../services/geo');
 
 const router = express.Router();
 
@@ -376,11 +377,25 @@ router.get('/my-boosts', requireAuth, async (req, res) => {
     if (error) return res.status(500).json({ success: false, message: error.message });
 
     const now = Date.now();
-    const boosts = (videos || []).map((v) => {
+    const boosts = await Promise.all((videos || []).map(async (v) => {
       const end = v.boost_end ? new Date(v.boost_end).getTime() : 0;
       const active = end > now;
       const msLeft = Math.max(0, end - now);
       const viewsGained = Math.max(0, (v.views || 0) - (v.boost_views_start || 0));
+      const amount = v.boost_amount || 0;
+
+      // Portée réelle = spectateurs UNIQUES depuis le début du boost
+      let reach = null;
+      try {
+        let q = supabaseAdmin
+          .from('video_views')
+          .select('id', { count: 'exact', head: true })
+          .eq('video_id', v.id);
+        if (v.boost_started_at) q = q.gte('created_at', v.boost_started_at);
+        const { count, error } = await q;
+        if (!error) reach = count || 0;
+      } catch (_) { /* table absente avant migration */ }
+
       return {
         id: v.id,
         title: v.title,
@@ -392,12 +407,14 @@ router.get('/my-boosts', requireAuth, async (req, res) => {
         boost_end: v.boost_end,
         regions: v.boost_regions || [v.boost_region || 'all'],
         gender: v.boost_gender || 'all',
-        amount: v.boost_amount || 0,
+        amount,
         views_total: v.views || 0,
         views_gained: viewsGained,
+        reach, // spectateurs uniques
+        cost_per_view: viewsGained > 0 ? Math.round(amount / viewsGained) : null,
         likes: v.likes_count || 0,
       };
-    });
+    }));
 
     return res.json({ success: true, boosts });
   } catch (err) {
@@ -591,15 +608,39 @@ router.get('/popular-tags', async (req, res) => {
 router.post('/:id/view', optionalAuth, async (req, res) => {
   const { id } = req.params;
   try {
-    // Essaie la fonction RPC, sinon incrément manuel en repli
-    const { error: rpcErr } = await supabaseAdmin.rpc('increment_views', { video_id: id });
-    if (rpcErr) {
-      const { data: v } = await supabaseAdmin.from('videos').select('views').eq('id', id).single();
-      if (v) {
-        await supabaseAdmin.from('videos').update({ views: (v.views || 0) + 1 }).eq('id', id);
+    // Clé unique du spectateur : compte connecté > appareil > IP.
+    // → une même personne ne compte qu'UNE vue par vidéo (anti-fraude boost).
+    const deviceId = (req.headers['x-device-id'] || req.body?.device_id || '').toString().slice(0, 64);
+    const viewerKey = req.user?.id
+      ? `u:${req.user.id}`
+      : (deviceId ? `d:${deviceId}` : `ip:${getClientIp(req)}`);
+
+    // Enregistre la vue unique. Si elle existe déjà (doublon), on ne recompte pas.
+    let counts = true;
+    try {
+      const { error } = await supabaseAdmin
+        .from('video_views')
+        .insert({ video_id: id, viewer_key: viewerKey });
+      if (error) {
+        if (error.code === '23505' || /duplicate|unique/i.test(error.message || '')) {
+          counts = false; // déjà vue par cette personne
+        }
+        // autre erreur (ex: table absente avant migration) → on compte quand même
+      }
+    } catch (_) {
+      // table video_views indisponible → repli : on compte simplement
+    }
+
+    if (counts) {
+      const { error: rpcErr } = await supabaseAdmin.rpc('increment_views', { video_id: id });
+      if (rpcErr) {
+        const { data: v } = await supabaseAdmin.from('videos').select('views').eq('id', id).single();
+        if (v) {
+          await supabaseAdmin.from('videos').update({ views: (v.views || 0) + 1 }).eq('id', id);
+        }
       }
     }
-    return res.json({ success: true });
+    return res.json({ success: true, counted: counts });
   } catch (err) {
     return res.json({ success: true }); // jamais bloquant
   }
