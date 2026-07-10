@@ -50,6 +50,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS monetization_blocked_reason TEXT;
 CREATE INDEX IF NOT EXISTS idx_users_device ON users(device_id) WHERE device_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_payout ON users(payout_phone) WHERE payout_phone IS NOT NULL;
 
+-- ── Profil complet à l'inscription (ciblage boost précis) ─────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
+
 -- ── Auth par email (Brevo) : un seul compte par email ─────────────────
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;

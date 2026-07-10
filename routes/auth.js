@@ -254,10 +254,16 @@ router.post('/email/verify', async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
+    // Profil complet = toutes les infos essentielles au ciblage boost
+    const profileComplete = Boolean(
+      user.full_name && user.birth_year && user.region && user.gender
+    );
+
     return res.json({
       success: true,
       message: isNewUser ? 'Compte créé avec succès' : 'Connexion réussie',
       isNewUser,
+      profileComplete,
       token,
       user: {
         id: user.id,
@@ -279,8 +285,32 @@ router.post('/email/verify', async (req, res) => {
  */
 router.put('/profile', requireAuth, async (req, res) => {
   try {
-    const { username, bio, avatar_url, region, gender, birthYear } = req.body;
+    const { username, bio, avatar_url, region, gender, birthYear, fullName, birthDate } = req.body;
     const updates = {};
+
+    // Nom complet (affiché sur le profil, requis pour un compte sérieux)
+    if (fullName !== undefined) {
+      const n = (fullName || '').toString().trim();
+      if (n && n.length < 2) {
+        return res.status(400).json({ success: false, message: 'Nom complet trop court' });
+      }
+      updates.full_name = n ? n.slice(0, 80) : null;
+    }
+
+    // Date de naissance (AAAA-MM-JJ) → déduit aussi birth_year pour le ciblage
+    if (birthDate !== undefined && birthDate) {
+      const d = new Date(birthDate);
+      const y = d.getFullYear();
+      if (isNaN(d.getTime()) || y < 1920 || y > new Date().getFullYear()) {
+        return res.status(400).json({ success: false, message: 'Date de naissance invalide' });
+      }
+      const age = Math.floor((Date.now() - d.getTime()) / (365.25 * 24 * 3600 * 1000));
+      if (age < 13) {
+        return res.status(400).json({ success: false, message: 'Tu dois avoir au moins 13 ans pour utiliser BeninPlay' });
+      }
+      updates.birth_date = birthDate;
+      updates.birth_year = y;
+    }
 
     // Région déclarée ou détectée par GPS (doit être un des 12 départements)
     if (region !== undefined && region !== null) {
@@ -334,12 +364,27 @@ router.put('/profile', requireAuth, async (req, res) => {
 
     updates.updated_at = new Date().toISOString();
 
-    const { data: updatedUser, error } = await supabaseAdmin
+    let { data: updatedUser, error } = await supabaseAdmin
       .from('users')
       .update(updates)
       .eq('id', req.user.id)
       .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance, region, gender, birth_year')
       .single();
+
+    // Compat pré-migration : si full_name / birth_date n'existent pas encore,
+    // on réessaie sans ces colonnes (le reste du profil est quand même sauvé).
+    if (error && (updates.full_name !== undefined || updates.birth_date !== undefined)) {
+      delete updates.full_name;
+      delete updates.birth_date;
+      if (Object.keys(updates).filter((k) => k !== 'updated_at').length > 0) {
+        ({ data: updatedUser, error } = await supabaseAdmin
+          .from('users')
+          .update(updates)
+          .eq('id', req.user.id)
+          .select('id, phone, username, bio, avatar_url, is_creator, wallet_balance, region, gender, birth_year')
+          .single());
+      }
+    }
 
     if (error) {
       return res.status(500).json({ success: false, message: 'Erreur mise à jour' });
