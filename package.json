@@ -11,6 +11,7 @@
     "@supabase/supabase-js": "^2.108.2",
     "africastalking": "^0.6.4",
     "agora-access-token": "^2.0.4",
+    "ffmpeg-static": "^5.2.0",
     "axios": "^1.6.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
+const { enqueueHls } = require('../services/transcode');
 
 const router = express.Router();
 
@@ -17,8 +18,14 @@ async function loadPaywall(videos, userId) {
   if (!videos || videos.length === 0) return out;
   const ids = videos.map((v) => v.id);
   try {
-    const { data: pr } = await supabaseAdmin.from('videos').select('id, price').in('id', ids);
-    if (pr) for (const r of pr) out.priceMap[r.id] = r.price || 0;
+    // hls_url : version multi-qualités (adaptative) générée par le serveur
+    let { data: pr } = await supabaseAdmin.from('videos').select('id, price, hls_url').in('id', ids);
+    if (!pr) ({ data: pr } = await supabaseAdmin.from('videos').select('id, price').in('id', ids));
+    if (pr) {
+      const hls = {};
+      for (const r of pr) { out.priceMap[r.id] = r.price || 0; if (r.hls_url) hls[r.id] = r.hls_url; }
+      for (const v of videos) if (hls[v.id]) v.hls_url = hls[v.id];
+    }
   } catch (_) { /* colonne price absente */ }
   if (userId) {
     try {
@@ -35,7 +42,12 @@ function lockFields(v, priceMap, purchasedIds, userId) {
   const price = priceMap[v.id] || 0;
   const isOwner = userId && v.creator && v.creator.id === userId;
   const locked = price > 0 && !isOwner && !purchasedIds.has(v.id);
-  return { price, is_locked: locked, video_url: locked ? null : v.video_url };
+  return {
+    price,
+    is_locked: locked,
+    video_url: locked ? null : v.video_url,
+    hls_url: locked ? null : (v.hls_url || null),
+  };
 }
 
 // Configuration multer - stockage en mémoire puis upload vers Supabase Storage
@@ -150,6 +162,10 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
 
     // Publier est ouvert à tous. Le statut "créateur" (monétisation) reste
     // une demande spéciale à valider — il n'est PAS attribué automatiquement.
+
+    // Transcodage adaptatif (240p/480p) en arrière-plan : la vidéo est
+    // disponible tout de suite en MP4, puis bascule en HLS quand c'est prêt.
+    enqueueHls(videoId, req.user.id, req.file.buffer);
 
     return res.status(201).json({
       success: true,

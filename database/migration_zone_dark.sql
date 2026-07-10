@@ -235,3 +235,6 @@ BEGIN
   GET DIAGNOSTICS affected = ROW_COUNT;
   RETURN affected > 0;
 END; $$;
+
+-- ── Vidéo adaptative (HLS multi-qualités générée par le serveur) ──────
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS hls_url TEXT;
