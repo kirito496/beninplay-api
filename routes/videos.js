@@ -19,12 +19,23 @@ async function loadPaywall(videos, userId) {
   const ids = videos.map((v) => v.id);
   try {
     // hls_url : version multi-qualités (adaptative) générée par le serveur
-    let { data: pr } = await supabaseAdmin.from('videos').select('id, price, hls_url').in('id', ids);
+    // filter/overlays : effets d'édition "façon Snapchat" (réappliqués à la lecture)
+    let { data: pr } = await supabaseAdmin.from('videos').select('id, price, hls_url, filter, overlays').in('id', ids);
+    if (!pr) ({ data: pr } = await supabaseAdmin.from('videos').select('id, price, hls_url').in('id', ids));
     if (!pr) ({ data: pr } = await supabaseAdmin.from('videos').select('id, price').in('id', ids));
     if (pr) {
-      const hls = {};
-      for (const r of pr) { out.priceMap[r.id] = r.price || 0; if (r.hls_url) hls[r.id] = r.hls_url; }
-      for (const v of videos) if (hls[v.id]) v.hls_url = hls[v.id];
+      const hls = {}, flt = {}, ovl = {};
+      for (const r of pr) {
+        out.priceMap[r.id] = r.price || 0;
+        if (r.hls_url) hls[r.id] = r.hls_url;
+        if (r.filter) flt[r.id] = r.filter;
+        if (r.overlays) ovl[r.id] = r.overlays;
+      }
+      for (const v of videos) {
+        if (hls[v.id]) v.hls_url = hls[v.id];
+        if (flt[v.id]) v.filter = flt[v.id];
+        if (ovl[v.id]) v.overlays = ovl[v.id];
+      }
     }
   } catch (_) { /* colonne price absente */ }
   if (userId) {
@@ -140,9 +151,29 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       }
     }
 
+    // Effets d'édition "façon Snapchat" : filtre couleur + overlays
+    // (textes / emojis). Stockés en métadonnées, réappliqués à la lecture.
+    const { filter, overlays } = req.body;
+    let overlaysJson = null;
+    if (overlays) {
+      try {
+        const parsed = typeof overlays === 'string' ? JSON.parse(overlays) : overlays;
+        if (Array.isArray(parsed)) overlaysJson = parsed.slice(0, 30);
+      } catch (_) { /* overlays invalides → ignorés */ }
+    }
+    const filterVal = (typeof filter === 'string' && filter.trim().length > 0 && filter.length < 30)
+      ? filter.trim()
+      : null;
+
     // + zone et prix (colonnes optionnelles : présentes après la migration)
     const priceVal = Math.max(0, parseInt(req.body.price, 10) || 0);
-    const withZone = { ...videoData, zone: zone === 'dark' ? 'dark' : 'normal', price: priceVal };
+    const withZone = {
+      ...videoData,
+      zone: zone === 'dark' ? 'dark' : 'normal',
+      price: priceVal,
+      filter: filterVal,
+      overlays: overlaysJson,
+    };
 
     let { data: video, error: dbError } = await supabaseAdmin
       .from('videos').insert(withZone).select().single();

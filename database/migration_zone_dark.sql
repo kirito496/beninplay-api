@@ -238,3 +238,8 @@ END; $$;
 
 -- ── Vidéo adaptative (HLS multi-qualités générée par le serveur) ──────
 ALTER TABLE videos ADD COLUMN IF NOT EXISTS hls_url TEXT;
+
+-- ── Édition "façon Snapchat" : filtre couleur + overlays (texte/emojis) ──
+-- Métadonnées légères réappliquées à la lecture (aucun ré-encodage vidéo).
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS filter VARCHAR(30);
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS overlays JSONB;
