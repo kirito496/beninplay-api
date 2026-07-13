@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
-const { enqueueHls } = require('../services/transcode');
+const { enqueueHls, faststart } = require('../services/transcode');
 
 const router = express.Router();
 
@@ -62,12 +62,20 @@ function lockFields(v, priceMap, purchasedIds, userId) {
 }
 
 // Configuration multer - stockage en mémoire puis upload vers Supabase Storage
+// Champs : "video" (obligatoire) + "thumbnail" (image d'aperçu, optionnelle —
+// affichée instantanément dans le fil pendant que la vidéo charge, comme TikTok).
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 200 * 1024 * 1024, // 200 MB max
   },
   fileFilter(req, file, cb) {
+    if (file.fieldname === 'thumbnail') {
+      const okImg = ['image/jpeg', 'image/png', 'image/webp'];
+      return okImg.includes(file.mimetype)
+        ? cb(null, true)
+        : cb(new Error('Miniature : format image non supporté (JPEG, PNG ou WebP)'));
+    }
     const allowed = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm', 'video/3gpp'];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
@@ -76,14 +84,20 @@ const upload = multer({
     }
   },
 });
+const uploadFields = upload.fields([
+  { name: 'video', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 },
+]);
 
 /**
  * POST /api/videos/upload
  * Upload d'une vidéo (réservé aux créateurs)
  */
-router.post('/upload', requireAuth, upload.single('video'), async (req, res) => {
+router.post('/upload', requireAuth, uploadFields, async (req, res) => {
   try {
-    if (!req.file) {
+    const videoFile = req.files?.video?.[0];
+    const thumbFile = req.files?.thumbnail?.[0];
+    if (!videoFile) {
       return res.status(400).json({ success: false, message: 'Fichier vidéo requis' });
     }
 
@@ -94,15 +108,25 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
     }
 
     const videoId = uuidv4();
-    const fileExt = req.file.originalname.split('.').pop() || 'mp4';
+    const fileExt = videoFile.originalname.split('.').pop() || 'mp4';
     const storagePath = `videos/${req.user.id}/${videoId}.${fileExt}`;
     const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'videos';
+
+    // ── Faststart : place l'index du MP4 au DÉBUT du fichier ──
+    // Les MP4 Android ont l'index à la fin → le lecteur perd 1-3 s en
+    // allers-retours réseau avant de démarrer. Remux en copie de flux
+    // (rapide, sans ré-encodage). En cas d'échec : fichier d'origine.
+    let videoBuffer = videoFile.buffer;
+    if (['video/mp4', 'video/quicktime'].includes(videoFile.mimetype)) {
+      const fast = await faststart(videoBuffer);
+      if (fast) videoBuffer = fast;
+    }
 
     // Upload vers Supabase Storage
     const { error: uploadError } = await supabaseAdmin.storage
       .from(bucket)
-      .upload(storagePath, req.file.buffer, {
-        contentType: req.file.mimetype,
+      .upload(storagePath, videoBuffer, {
+        contentType: videoFile.mimetype,
         upsert: false,
       });
 
@@ -124,6 +148,23 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
         .slice(0, 10);
     }
 
+    // ── Miniature (affichée instantanément dans le fil pendant le chargement) ──
+    let finalThumbUrl = thumbnail_url || null;
+    if (thumbFile) {
+      const thumbExt = thumbFile.mimetype === 'image/png' ? 'png'
+        : thumbFile.mimetype === 'image/webp' ? 'webp' : 'jpg';
+      const thumbPath = `thumbnails/${req.user.id}/${videoId}.${thumbExt}`;
+      const { error: thumbErr } = await supabaseAdmin.storage
+        .from(bucket)
+        .upload(thumbPath, thumbFile.buffer, { contentType: thumbFile.mimetype, upsert: true });
+      if (!thumbErr) {
+        const { data: tPub } = supabaseAdmin.storage.from(bucket).getPublicUrl(thumbPath);
+        if (tPub?.publicUrl) finalThumbUrl = tPub.publicUrl;
+      } else {
+        console.warn('[Videos] miniature non enregistrée:', thumbErr.message);
+      }
+    }
+
     // Enregistrer la vidéo en base (colonnes de base garanties)
     const videoData = {
       id: videoId,
@@ -132,14 +173,14 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
       description: description?.trim().slice(0, 2000) || null,
       video_url: videoUrl,
       storage_path: storagePath,
-      thumbnail_url: thumbnail_url || null,
+      thumbnail_url: finalThumbUrl,
       tags: parsedTags,
       status: 'published',
       views: 0,
       likes_count: 0,
       comments_count: 0,
       shares_count: 0,
-      file_size: req.file.size,
+      file_size: videoBuffer.length,
       created_at: new Date().toISOString(),
     };
     // Publier en Zone Dark exige une identité vérifiée (+18)
@@ -196,7 +237,7 @@ router.post('/upload', requireAuth, upload.single('video'), async (req, res) => 
 
     // Transcodage adaptatif (240p/480p) en arrière-plan : la vidéo est
     // disponible tout de suite en MP4, puis bascule en HLS quand c'est prêt.
-    enqueueHls(videoId, req.user.id, req.file.buffer);
+    enqueueHls(videoId, req.user.id, videoBuffer);
 
     return res.status(201).json({
       success: true,

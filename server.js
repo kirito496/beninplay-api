@@ -135,6 +135,7 @@ const server = http.createServer(app);
 initWebSocketServer(server);
 
 server.listen(PORT, () => {
+  const ffmpegOk = require('./services/transcode').isConfigured();
   console.log(`
   ┌─────────────────────────────────────────┐
   │   BeninPlay API démarrée                │
@@ -142,6 +143,7 @@ server.listen(PORT, () => {
   │   Env      : ${(process.env.NODE_ENV || 'production').padEnd(11)}            │
   │   WebSocket: ws://localhost:${PORT}/ws       │
   └─────────────────────────────────────────┘
+  Vidéo : ffmpeg ${ffmpegOk ? 'ACTIF (faststart + HLS adaptatif ✓)' : 'ABSENT ✗ — pas de faststart ni de HLS (vérifier ffmpeg-static)'}
   `);
 });
 

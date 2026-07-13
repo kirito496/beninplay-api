@@ -93,4 +93,29 @@ async function transcode(videoId, creatorId, buffer) {
   }
 }
 
-module.exports = { enqueueHls, isConfigured: () => !!ffmpegPath };
+// ── Faststart : déplace l'index du MP4 (moov) AU DÉBUT du fichier ──────
+// Les MP4 compressés sur Android ont leur index à la FIN : le lecteur doit
+// faire plusieurs allers-retours réseau avant de démarrer (1-3 s perdues à
+// chaque première lecture). Ce remux (copie de flux, PAS de ré-encodage,
+// quelques secondes) permet au lecteur de démarrer dès les premiers octets.
+// Renvoie le nouveau buffer, ou null si ffmpeg absent / échec (on garde
+// alors le fichier d'origine — jamais bloquant).
+async function faststart(buffer) {
+  if (!ffmpegPath || !buffer) return null;
+  const work = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'fast-'));
+  try {
+    const input = path.join(work, 'in.mp4');
+    const output = path.join(work, 'out.mp4');
+    await fs.promises.writeFile(input, buffer);
+    await run(['-y', '-i', input, '-c', 'copy', '-movflags', '+faststart', output], work);
+    const out = await fs.promises.readFile(output);
+    return out.length > 0 ? out : null;
+  } catch (e) {
+    console.warn('[Faststart] remux impossible (fichier d\'origine conservé):', e.message);
+    return null;
+  } finally {
+    fs.promises.rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+module.exports = { enqueueHls, faststart, isConfigured: () => !!ffmpegPath };
