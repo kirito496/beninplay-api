@@ -243,3 +243,26 @@ ALTER TABLE videos ADD COLUMN IF NOT EXISTS hls_url TEXT;
 -- Métadonnées légères réappliquées à la lecture (aucun ré-encodage vidéo).
 ALTER TABLE videos ADD COLUMN IF NOT EXISTS filter VARCHAR(30);
 ALTER TABLE videos ADD COLUMN IF NOT EXISTS overlays JSONB;
+
+-- ── Modération (exigences Google Play pour le contenu UGC) ────────────
+-- Signalements de vidéos : un utilisateur ne peut signaler une vidéo qu'une fois.
+CREATE TABLE IF NOT EXISTS video_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  video_id UUID NOT NULL,
+  reporter_id UUID NOT NULL,
+  reason VARCHAR(20) NOT NULL DEFAULT 'autre',
+  details TEXT,
+  status VARCHAR(15) NOT NULL DEFAULT 'pending', -- pending | dismissed | actioned
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (video_id, reporter_id)
+);
+CREATE INDEX IF NOT EXISTS idx_video_reports_status ON video_reports(status);
+
+-- Blocages entre utilisateurs : les vidéos d'un créateur bloqué
+-- disparaissent du fil du bloqueur.
+CREATE TABLE IF NOT EXISTS user_blocks (
+  blocker_id UUID NOT NULL,
+  blocked_id UUID NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (blocker_id, blocked_id)
+);

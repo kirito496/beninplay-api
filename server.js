@@ -84,6 +84,17 @@ app.get('/admin', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// Pages légales publiques (exigées par Google Play)
+app.get('/confidentialite', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'confidentialite.html'));
+});
+app.get('/cgu', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'cgu.html'));
+});
+app.get('/supprimer-compte', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'suppression-compte.html'));
+});
+
 // ============================================================
 // Routes API
 // ============================================================

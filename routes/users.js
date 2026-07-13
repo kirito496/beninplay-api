@@ -8,6 +8,93 @@ const { notify } = require('../services/notify');
 const router = express.Router();
 
 /**
+ * DELETE /api/users/me
+ * Suppression du compte (exigence Google Play) : supprime les vidéos du
+ * stockage, les données liées (best-effort) puis le compte lui-même.
+ * Action DÉFINITIVE — confirmée côté app par une double validation.
+ */
+router.delete('/me', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'videos';
+  try {
+    // 1) Fichiers vidéo du créateur dans le stockage (best-effort)
+    try {
+      const { data: vids } = await supabaseAdmin
+        .from('videos').select('storage_path').eq('creator_id', userId);
+      const paths = (vids || []).map((v) => v.storage_path).filter(Boolean);
+      if (paths.length > 0) {
+        await supabaseAdmin.storage.from(bucket).remove(paths).catch(() => {});
+      }
+    } catch (_) {}
+
+    // 2) Données liées (chaque table peut ne pas exister : best-effort)
+    const cleanups = [
+      () => supabaseAdmin.from('videos').delete().eq('creator_id', userId),
+      () => supabaseAdmin.from('video_likes').delete().eq('user_id', userId),
+      () => supabaseAdmin.from('video_purchases').delete().eq('user_id', userId),
+      () => supabaseAdmin.from('follows').delete().eq('follower_id', userId),
+      () => supabaseAdmin.from('follows').delete().eq('following_id', userId),
+      () => supabaseAdmin.from('notifications').delete().eq('user_id', userId),
+      () => supabaseAdmin.from('user_blocks').delete().eq('blocker_id', userId),
+      () => supabaseAdmin.from('user_blocks').delete().eq('blocked_id', userId),
+      () => supabaseAdmin.from('video_reports').delete().eq('reporter_id', userId),
+    ];
+    for (const fn of cleanups) {
+      try { await fn(); } catch (_) {}
+    }
+
+    // 3) Le compte lui-même — si ça échoue, on le signale clairement
+    const { error } = await supabaseAdmin.from('users').delete().eq('id', userId);
+    if (error) {
+      console.error('[Users] suppression compte échouée:', error.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Suppression impossible pour le moment. Contacte le support.',
+      });
+    }
+
+    console.log(`[Users] compte ${userId} supprimé (demande utilisateur)`);
+    return res.json({ success: true, message: 'Compte supprimé définitivement.' });
+  } catch (err) {
+    console.error('[Users] delete/me erreur:', err.message);
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+/**
+ * POST /api/users/:id/block — bloquer un utilisateur (exigence Google Play UGC)
+ * DELETE /api/users/:id/block — le débloquer
+ * Les vidéos d'un créateur bloqué disparaissent du fil du bloqueur.
+ */
+router.post('/:id/block', requireAuth, async (req, res) => {
+  const blockedId = req.params.id;
+  if (blockedId === req.user.id) {
+    return res.status(400).json({ success: false, message: 'Impossible de se bloquer soi-même' });
+  }
+  try {
+    const { error } = await supabaseAdmin
+      .from('user_blocks')
+      .upsert({ blocker_id: req.user.id, blocked_id: blockedId }, { onConflict: 'blocker_id,blocked_id' });
+    if (error) throw error;
+    return res.json({ success: true, message: 'Utilisateur bloqué' });
+  } catch (err) {
+    console.error('[Users] block erreur:', err.message);
+    return res.status(500).json({ success: false, message: 'Blocage impossible (migration manquante ?)' });
+  }
+});
+
+router.delete('/:id/block', requireAuth, async (req, res) => {
+  try {
+    await supabaseAdmin
+      .from('user_blocks').delete()
+      .eq('blocker_id', req.user.id).eq('blocked_id', req.params.id);
+    return res.json({ success: true, message: 'Utilisateur débloqué' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+/**
  * GET /api/users/leaderboard?limit=50
  * Classement des créateurs par score d'impact (vues complétées incluses).
  */

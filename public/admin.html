@@ -60,6 +60,7 @@
     <button data-tab="kyc" onclick="go('kyc')">🪪 KYC</button>
     <button data-tab="creators" onclick="go('creators')">⭐ Créateurs</button>
     <button data-tab="flagged" onclick="go('flagged')">🚩 Signalés</button>
+    <button data-tab="reports" onclick="go('reports')">🛡️ Modération</button>
   </div>
 
   <div class="count" id="count"></div>
@@ -83,10 +84,12 @@ function toast(m) {
 }
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-async function api(path, method='GET') {
-  const res = await fetch(path, { method, headers: { 'x-admin-key': key() } });
+async function api(path, method='GET', body) {
+  const headers = { 'x-admin-key': key() };
+  if (body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   let data = {}; try { data = await res.json(); } catch(_) {}
-  if (res.status === 401) { toast('Clé admin invalide'); throw new Error('401'); }
+  if (res.status === 401 || res.status === 403) { toast('Clé admin invalide'); throw new Error('401'); }
   return data;
 }
 
@@ -110,6 +113,7 @@ async function load() {
     if (TAB === 'kyc')         return renderKyc(await api('/api/dark/kyc/pending'));
     if (TAB === 'creators')    return renderCreators(await api('/api/auth/creator/requests'));
     if (TAB === 'flagged')     return renderFlagged(await api('/api/monetization/flagged'));
+    if (TAB === 'reports')     return renderReports(await api('/api/videos/admin/reports'));
   } catch(e){ if(e.message!=='401') $('#list').innerHTML='<div class="empty">Erreur de chargement</div>'; }
 }
 
@@ -186,6 +190,33 @@ function renderFlagged(d) {
         <button class="g" onclick="act('/api/monetization/${u.id}/restore','Réactivé')">✅ Réactiver</button>
         <button class="ghost" onclick="act('/api/monetization/${u.id}/block','Bloqué')">🚫 Bloquer</button>
       </div></div>`).join('');
+}
+
+const REASON_LABELS = { nudite:'🔞 Nudité', violence:'⚔️ Violence', haine:'😡 Haine',
+  arnaque:'💸 Arnaque', spam:'📢 Spam', mineur:'🚨 Mineur en danger', autre:'❓ Autre' };
+
+async function reportAct(id, action, okMsg) {
+  try { const r = await api('/api/videos/admin/reports/'+id+'/action', 'POST', { action });
+    toast(r.message || okMsg); load(); }
+  catch(e){ if(e.message!=='401') toast('Erreur'); }
+}
+
+function renderReports(d) {
+  const items = d.reports || [];
+  if (!items.length) return ($('#list').innerHTML = empty('Aucun signalement en attente 🎉'), setCount(0));
+  setCount(items.length);
+  $('#list').innerHTML = items.map(r => {
+    const date = new Date(r.created_at).toLocaleString('fr-FR');
+    return `<div class="card">
+      <div class="row"><div class="big">${esc(r.video_title)}</div>
+        <span class="badge red">${esc(REASON_LABELS[r.reason] || r.reason)}</span></div>
+      <div class="mut">Créateur : ${esc(r.creator_name)} · Signalé le ${esc(date)}</div>
+      ${r.details?`<div class="mut">« ${esc(r.details)} »</div>`:''}
+      <div class="actions">
+        <button class="r" onclick="reportAct('${r.id}','remove_video','Vidéo retirée')">🗑️ Retirer la vidéo</button>
+        <button class="ghost" onclick="reportAct('${r.id}','dismiss','Classé')">✓ Sans suite</button>
+      </div></div>`;
+  }).join('');
 }
 
 // Auto : si une clé est déjà mémorisée, on charge

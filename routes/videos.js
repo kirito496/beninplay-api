@@ -48,6 +48,19 @@ async function loadPaywall(videos, userId) {
   return out;
 }
 
+// IDs des créateurs bloqués par ce spectateur (best-effort : table optionnelle).
+// Leurs vidéos disparaissent de son fil — exigence Google Play (contenu UGC).
+async function loadBlockedIds(userId) {
+  if (!userId) return new Set();
+  try {
+    const { data } = await supabaseAdmin
+      .from('user_blocks').select('blocked_id').eq('blocker_id', userId);
+    return new Set((data || []).map((b) => b.blocked_id));
+  } catch (_) {
+    return new Set();
+  }
+}
+
 // Renvoie {price, is_locked, video_url} : masque l'URL si vidéo payante non achetée
 function lockFields(v, priceMap, purchasedIds, userId) {
   const price = priceMap[v.id] || 0;
@@ -304,6 +317,12 @@ router.get('/', optionalAuth, async (req, res) => {
 
     // Le feed normal ne montre JAMAIS les vidéos de la Zone Dark
     if (hasZone) videos = (videos || []).filter((v) => v.zone !== 'dark');
+
+    // Retire les vidéos des créateurs bloqués par ce spectateur
+    const blockedIds = await loadBlockedIds(req.user?.id);
+    if (blockedIds.size > 0) {
+      videos = (videos || []).filter((v) => !blockedIds.has(v.creator?.id || v.creator_id));
+    }
 
     // Feed "frais" : sur la 1re page, on mélange l'ordre pour éviter de revoir
     // toujours la même vidéo en tête (surtout quand il y a peu de contenu).
@@ -631,7 +650,10 @@ router.get('/following', requireAuth, async (req, res) => {
       if (likes) likedIds = new Set(likes.map((l) => l.video_id));
     }
 
-    const visible = (videos || []).filter((v) => v.zone !== 'dark');
+    const blocked = await loadBlockedIds(req.user.id);
+    const visible = (videos || []).filter(
+      (v) => v.zone !== 'dark' && !blocked.has(v.creator?.id),
+    );
     const { priceMap, purchasedIds } = await loadPaywall(visible, req.user.id);
     const enriched = visible.map((v) => ({
       ...v,
@@ -1232,6 +1254,113 @@ router.patch('/:id/price', requireAuth, async (req, res) => {
     return res.json({ success: true, message: price > 0 ? `Prix fixé à ${price} FCFA` : 'Vidéo gratuite', price });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Erreur interne' });
+  }
+});
+
+// ── Signalement de contenu (exigence Google Play pour le contenu UGC) ────────
+
+const REPORT_REASONS = ['nudite', 'violence', 'haine', 'arnaque', 'spam', 'mineur', 'autre'];
+
+function requireAdmin(req, res, next) {
+  if (!process.env.ADMIN_KEY || req.headers['x-admin-key'] !== process.env.ADMIN_KEY) {
+    return res.status(403).json({ success: false, message: 'Accès refusé' });
+  }
+  next();
+}
+
+/**
+ * POST /api/videos/:id/report
+ * Signaler une vidéo. Motifs : nudite, violence, haine, arnaque, spam, mineur, autre.
+ */
+router.post('/:id/report', requireAuth, async (req, res) => {
+  const videoId = req.params.id;
+  const reason = REPORT_REASONS.includes(req.body?.reason) ? req.body.reason : 'autre';
+  const details = (req.body?.details || '').toString().slice(0, 500) || null;
+  try {
+    const { error } = await supabaseAdmin.from('video_reports').insert({
+      video_id: videoId,
+      reporter_id: req.user.id,
+      reason,
+      details,
+      status: 'pending',
+    });
+    if (error) {
+      // Doublon (même personne, même vidéo) → on confirme quand même
+      if (/duplicate|unique/i.test(error.message || '')) {
+        return res.json({ success: true, message: 'Signalement déjà enregistré. Merci !' });
+      }
+      throw error;
+    }
+    return res.json({ success: true, message: 'Signalement envoyé. Notre équipe va vérifier.' });
+  } catch (err) {
+    console.error('[Videos] report erreur:', err.message);
+    return res.status(500).json({ success: false, message: 'Signalement impossible (migration manquante ?)' });
+  }
+});
+
+/**
+ * GET /api/videos/admin/reports — liste des signalements en attente (console admin)
+ */
+router.get('/admin/reports', requireAdmin, async (_req, res) => {
+  try {
+    const { data: reports, error } = await supabaseAdmin
+      .from('video_reports')
+      .select('id, video_id, reporter_id, reason, details, status, created_at')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(100);
+    if (error) throw error;
+
+    // Joint les infos vidéo (titre + créateur) pour affichage
+    const vIds = [...new Set((reports || []).map((r) => r.video_id))];
+    let vMap = {};
+    if (vIds.length > 0) {
+      const { data: vids } = await supabaseAdmin
+        .from('videos')
+        .select('id, title, creator_id, creator:users!creator_id(username)')
+        .in('id', vIds);
+      for (const v of vids || []) vMap[v.id] = v;
+    }
+    const enriched = (reports || []).map((r) => ({
+      ...r,
+      video_title: vMap[r.video_id]?.title || '(vidéo supprimée)',
+      creator_name: vMap[r.video_id]?.creator?.username || '?',
+    }));
+    return res.json({ success: true, reports: enriched });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * POST /api/videos/admin/reports/:id/action
+ * { action: 'dismiss' } → signalement classé sans suite
+ * { action: 'remove_video' } → vidéo retirée du fil (status='removed') + signalement clos
+ */
+router.post('/admin/reports/:id/action', requireAdmin, async (req, res) => {
+  const action = req.body?.action;
+  if (!['dismiss', 'remove_video'].includes(action)) {
+    return res.status(400).json({ success: false, message: 'Action invalide' });
+  }
+  try {
+    const { data: report, error } = await supabaseAdmin
+      .from('video_reports').select('id, video_id').eq('id', req.params.id).single();
+    if (error || !report) {
+      return res.status(404).json({ success: false, message: 'Signalement introuvable' });
+    }
+    if (action === 'remove_video') {
+      await supabaseAdmin.from('videos')
+        .update({ status: 'removed' }).eq('id', report.video_id);
+      // Clôt aussi tous les autres signalements de la même vidéo
+      await supabaseAdmin.from('video_reports')
+        .update({ status: 'actioned' }).eq('video_id', report.video_id);
+      return res.json({ success: true, message: 'Vidéo retirée + signalements clos' });
+    }
+    await supabaseAdmin.from('video_reports')
+      .update({ status: 'dismissed' }).eq('id', report.id);
+    return res.json({ success: true, message: 'Signalement classé sans suite' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
