@@ -1,0 +1,51 @@
+# Déploiement Render.com (plan gratuit, sans carte bancaire)
+# ────────────────────────────────────────────────────────────
+# 1. Crée un compte sur https://render.com (connexion avec GitHub).
+# 2. New → Blueprint → choisis le dépôt kirito496/beninplay-api.
+# 3. Render lit ce fichier et crée le service automatiquement.
+# 4. Renseigne les variables marquées sync:false (copie-les depuis Railway
+#    AVANT que le projet Railway ne soit supprimé !).
+#
+# Limite du plan gratuit : le serveur s'endort après 15 min sans requête
+# (réveil ≈ 50 s au premier appel suivant).
+
+services:
+  - type: web
+    name: beninplay-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # ── À copier depuis Railway (Variables) ──
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      - key: SUPABASE_KYC_BUCKET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER
+        sync: false
+      - key: AGORA_APP_ID
+        sync: false
+      - key: AGORA_APP_CERTIFICATE
+        sync: false
+      - key: SMS_WEBHOOK_SECRET
+        sync: false
+      - key: MTN_NUMBER
+        sync: false
+      - key: MOOV_NUMBER
+        sync: false
