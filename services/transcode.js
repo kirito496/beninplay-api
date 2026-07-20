@@ -118,11 +118,55 @@ async function faststart(buffer) {
   }
 }
 
-// ── Rattrapage : vidéos publiées AVANT l'activation du HLS (hls_url vide) ──
-// Convertit 2 vidéos par passe (préserve le CPU du plan B1), re-vérifie
-// toutes les 10 minutes jusqu'à ce que tout le catalogue soit adaptatif.
+// ── Version LÉGÈRE 480p (MP4 unique, cachable, acceptée par le bucket) ──────
+// L'app télécharge cette version quand la connexion est lente (peu de data,
+// chargement rapide), et le MP4 d'origine (HD) quand la connexion est bonne.
+// Contrairement au HLS (.m3u8 refusé par le bucket), un MP4 en video/mp4 passe.
+async function transcodeLight(videoId, creatorId, buffer) {
+  const started = Date.now();
+  const work = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'light-'));
+  try {
+    const input = path.join(work, 'in.mp4');
+    const output = path.join(work, 'light.mp4');
+    await fs.promises.writeFile(input, buffer);
+    // 480p, CRF 28 (bonne compression), faststart pour démarrage rapide.
+    await run([
+      '-y', '-i', input,
+      '-vf', 'scale=-2:480',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-c:a', 'aac', '-b:a', '96k',
+      '-movflags', '+faststart',
+      output,
+    ], work);
+    const data = await fs.promises.readFile(output);
+    if (!data.length) throw new Error('sortie vide');
+    const dest = `videos/${creatorId}/${videoId}/light.mp4`;
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .upload(dest, data, { contentType: 'video/mp4', upsert: true });
+    if (upErr) throw new Error(`upload light.mp4: ${upErr.message}`);
+    const { data: pub } = supabaseAdmin.storage.from(BUCKET).getPublicUrl(dest);
+    // On réutilise la colonne hls_url pour stocker l'URL de la version légère.
+    const { error: dbErr } = await supabaseAdmin
+      .from('videos').update({ hls_url: pub.publicUrl }).eq('id', videoId);
+    if (dbErr) console.error('[Light] URL non enregistrée (migration ?):', dbErr.message);
+    else console.log(`[Light] ${videoId} 480p prêt en ${Math.round((Date.now() - started) / 1000)}s (${Math.round(data.length / 1024)} Ko)`);
+  } finally {
+    fs.promises.rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function enqueueLight(videoId, creatorId, buffer) {
+  if (!ffmpegPath || !buffer || !videoId) return;
+  chain = chain
+    .then(() => transcodeLight(videoId, creatorId, buffer))
+    .catch((e) => console.error('[Light]', videoId, 'échec (l\'app lit le MP4 HD):', e.message));
+}
+
+// ── Rattrapage : génère la version 480p des vidéos qui n'en ont pas encore ──
+// 2 vidéos par passe (préserve le CPU B1), re-vérifie toutes les 10 minutes.
 let backfillRunning = false;
-async function backfillHls() {
+async function backfillLight() {
   if (!ffmpegPath || backfillRunning) return;
   backfillRunning = true;
   try {
@@ -134,32 +178,27 @@ async function backfillHls() {
       .order('created_at', { ascending: false })
       .limit(2);
     if (error || !vids || vids.length === 0) return;
-    console.log(`[HLS] rattrapage : ${vids.length} vidéo(s) sans version adaptative`);
+    console.log(`[Light] rattrapage : ${vids.length} vidéo(s) sans version 480p`);
     for (const v of vids) {
       if (!v.storage_path) continue;
       const { data: file, error: dlErr } = await supabaseAdmin.storage
         .from(BUCKET)
         .download(v.storage_path);
       if (dlErr || !file) continue;
-      enqueueHls(v.id, v.creator_id, Buffer.from(await file.arrayBuffer()));
+      enqueueLight(v.id, v.creator_id, Buffer.from(await file.arrayBuffer()));
     }
     await chain; // attend la fin de la passe avant d'autoriser la suivante
   } catch (e) {
-    console.error('[HLS] rattrapage erreur:', e.message);
+    console.error('[Light] rattrapage erreur:', e.message);
   } finally {
     backfillRunning = false;
   }
 }
 
-// Rattrapage HLS DÉSACTIVÉ par défaut : l'app lit désormais le MP4 (mis en
-// cache disque sur le téléphone), le HLS n'est plus utilisé. En plus, le
-// bucket Supabase refuse le type MIME des playlists .m3u8, donc la génération
-// échouait en boucle. Réactivable via ENABLE_HLS=true (si un jour le bucket
-// autorise application/vnd.apple.mpegurl et video/mp2t).
-if (ffmpegPath && process.env.ENABLE_HLS === 'true') {
-  setTimeout(backfillHls, 60 * 1000); // 1 min après le boot
-  const t = setInterval(backfillHls, 10 * 60 * 1000);
+if (ffmpegPath) {
+  setTimeout(backfillLight, 60 * 1000); // 1 min après le boot
+  const t = setInterval(backfillLight, 10 * 60 * 1000);
   if (t.unref) t.unref();
 }
 
-module.exports = { enqueueHls, faststart, backfillHls, isConfigured: () => !!ffmpegPath };
+module.exports = { enqueueHls, enqueueLight, faststart, backfillLight, isConfigured: () => !!ffmpegPath };

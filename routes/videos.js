@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
-const { enqueueHls, faststart } = require('../services/transcode');
+const { enqueueLight, faststart } = require('../services/transcode');
 
 const router = express.Router();
 
@@ -284,12 +284,10 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
     // Publier est ouvert à tous. Le statut "créateur" (monétisation) reste
     // une demande spéciale à valider — il n'est PAS attribué automatiquement.
 
-    // Transcodage HLS désactivé : l'app lit le MP4 (mis en cache disque sur le
-    // téléphone). Réactivable via ENABLE_HLS=true si le bucket accepte un jour
-    // le type MIME des playlists .m3u8.
-    if (process.env.ENABLE_HLS === 'true') {
-      enqueueHls(videoId, req.user.id, videoBuffer);
-    }
+    // Version 480p légère (MP4) en arrière-plan : l'app la téléchargera si la
+    // connexion est lente, sinon elle prendra le MP4 HD. La vidéo est
+    // disponible tout de suite ; la version légère arrive quelques secondes après.
+    enqueueLight(videoId, req.user.id, videoBuffer);
 
     return res.status(201).json({
       success: true,
