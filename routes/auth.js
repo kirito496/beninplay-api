@@ -188,10 +188,16 @@ router.post('/email/request', async (req, res) => {
     // Si l'enregistrement échoue (ex : colonne phone trop courte), on N'ENVOIE
     // PAS d'email : inutile d'envoyer un code qui ne pourra jamais être vérifié.
     if (otpErr) {
-      console.error('[Auth] email/request insert otp_codes:', otpErr.message);
+      console.error('[Auth] email/request insert otp_codes:', otpErr);
+      // DEBUG TEMPORAIRE : on renvoie la vraie raison pour diagnostic à distance.
       return res.status(500).json({
         success: false,
-        message: "Impossible d'enregistrer le code. Réessayez dans un instant.",
+        message:
+          'DEBUG: ' +
+          (otpErr.message || 'erreur inconnue') +
+          ' | code=' + (otpErr.code || '-') +
+          ' | details=' + (otpErr.details || '-') +
+          ' | hint=' + (otpErr.hint || '-'),
       });
     }
 
