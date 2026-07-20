@@ -182,9 +182,18 @@ router.post('/email/request', async (req, res) => {
     // Persistant en base (otp_codes) : robuste aux redémarrages / multi-process
     // d'Azure. La mémoire vive n'est pas partagée entre process → codes perdus.
     await supabaseAdmin.from('otp_codes').delete().eq('phone', email);
-    await supabaseAdmin
+    const { error: otpErr } = await supabaseAdmin
       .from('otp_codes')
       .insert({ phone: email, code, used: false, expires_at: expiresAt });
+    // Si l'enregistrement échoue (ex : colonne phone trop courte), on N'ENVOIE
+    // PAS d'email : inutile d'envoyer un code qui ne pourra jamais être vérifié.
+    if (otpErr) {
+      console.error('[Auth] email/request insert otp_codes:', otpErr.message);
+      return res.status(500).json({
+        success: false,
+        message: "Impossible d'enregistrer le code. Réessayez dans un instant.",
+      });
+    }
 
     const r = await sendVerificationCode(email, code);
     console.log(`[Auth] code email ${email} = ${code} (envoyé: ${r.sent})`);
