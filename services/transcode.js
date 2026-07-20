@@ -151,7 +151,12 @@ async function backfillHls() {
   }
 }
 
-if (ffmpegPath) {
+// Rattrapage HLS DÉSACTIVÉ par défaut : l'app lit désormais le MP4 (mis en
+// cache disque sur le téléphone), le HLS n'est plus utilisé. En plus, le
+// bucket Supabase refuse le type MIME des playlists .m3u8, donc la génération
+// échouait en boucle. Réactivable via ENABLE_HLS=true (si un jour le bucket
+// autorise application/vnd.apple.mpegurl et video/mp2t).
+if (ffmpegPath && process.env.ENABLE_HLS === 'true') {
   setTimeout(backfillHls, 60 * 1000); // 1 min après le boot
   const t = setInterval(backfillHls, 10 * 60 * 1000);
   if (t.unref) t.unref();

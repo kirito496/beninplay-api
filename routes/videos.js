@@ -284,9 +284,12 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
     // Publier est ouvert à tous. Le statut "créateur" (monétisation) reste
     // une demande spéciale à valider — il n'est PAS attribué automatiquement.
 
-    // Transcodage adaptatif (240p/480p) en arrière-plan : la vidéo est
-    // disponible tout de suite en MP4, puis bascule en HLS quand c'est prêt.
-    enqueueHls(videoId, req.user.id, videoBuffer);
+    // Transcodage HLS désactivé : l'app lit le MP4 (mis en cache disque sur le
+    // téléphone). Réactivable via ENABLE_HLS=true si le bucket accepte un jour
+    // le type MIME des playlists .m3u8.
+    if (process.env.ENABLE_HLS === 'true') {
+      enqueueHls(videoId, req.user.id, videoBuffer);
+    }
 
     return res.status(201).json({
       success: true,
