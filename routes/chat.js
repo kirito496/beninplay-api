@@ -6,8 +6,46 @@ const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.get('/conversations', requireAuth, async (req, res) => {
   const { data: c } = await supabaseAdmin.from('conversations').select('id,updated_at,participant_a:users!participant_a_id(id,username,avatar_url),participant_b:users!participant_b_id(id,username,avatar_url)').or(`participant_a_id.eq.${req.user.id},participant_b_id.eq.${req.user.id}`).order('updated_at', { ascending: false }).limit(50);
-  const formatted = (c||[]).map(cv => ({ id: cv.id, otherUser: cv.participant_a?.id === req.user.id ? cv.participant_b : cv.participant_a, updatedAt: cv.updated_at }));
+  const list = c || [];
+  // Aperçu du dernier message + nombre de non-lus par conversation (2 requêtes)
+  const lastByConv = {}; const unreadByConv = {};
+  const ids = list.map(cv => cv.id);
+  if (ids.length > 0) {
+    const { data: msgs } = await supabaseAdmin.from('messages')
+      .select('conversation_id,content,message_type,sender_id,created_at,read_at')
+      .in('conversation_id', ids)
+      .order('created_at', { ascending: false })
+      .limit(300);
+    for (const m of (msgs || [])) {
+      if (!lastByConv[m.conversation_id]) lastByConv[m.conversation_id] = m;
+      if (m.sender_id !== req.user.id && !m.read_at) {
+        unreadByConv[m.conversation_id] = (unreadByConv[m.conversation_id] || 0) + 1;
+      }
+    }
+  }
+  const formatted = list.map(cv => {
+    const lm = lastByConv[cv.id];
+    return {
+      id: cv.id,
+      otherUser: cv.participant_a?.id === req.user.id ? cv.participant_b : cv.participant_a,
+      updatedAt: cv.updated_at,
+      lastMessage: lm ? { content: lm.content || '📎 Média', mine: lm.sender_id === req.user.id } : null,
+      unread: unreadByConv[cv.id] || 0,
+    };
+  });
   return res.json({ success: true, conversations: formatted });
+});
+// Total de messages non lus (badge sur l'icône Messages du fil)
+router.get('/unread', requireAuth, async (req, res) => {
+  const { data: c } = await supabaseAdmin.from('conversations').select('id').or(`participant_a_id.eq.${req.user.id},participant_b_id.eq.${req.user.id}`);
+  const ids = (c || []).map(x => x.id);
+  if (ids.length === 0) return res.json({ success: true, unread: 0 });
+  const { count } = await supabaseAdmin.from('messages')
+    .select('id', { count: 'exact', head: true })
+    .in('conversation_id', ids)
+    .neq('sender_id', req.user.id)
+    .is('read_at', null);
+  return res.json({ success: true, unread: count || 0 });
 });
 router.get('/conversations/:userId', requireAuth, async (req, res) => {
   const { userId } = req.params;

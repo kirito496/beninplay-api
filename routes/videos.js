@@ -61,6 +61,42 @@ async function loadBlockedIds(userId) {
   }
 }
 
+// ── Profil de goûts du spectateur (fil personnalisé "IA") ──────────────
+// Pondère les hashtags et créateurs de ses 80 derniers likes (poids 3) et
+// de ses 120 dernières vidéos regardées jusqu'au bout (poids 2). Le fil
+// s'adapte donc en TEMPS RÉEL : chaque like / visionnage complet modifie
+// le classement du prochain chargement.
+async function loadViewerPrefs(userId) {
+  const prefs = { tags: new Map(), creators: new Map() };
+  if (!userId) return prefs;
+  const addVideo = (v, w) => {
+    if (!v) return;
+    for (const t of (v.tags || [])) {
+      const k = String(t).toLowerCase();
+      prefs.tags.set(k, (prefs.tags.get(k) || 0) + w);
+    }
+    if (v.creator_id) prefs.creators.set(v.creator_id, (prefs.creators.get(v.creator_id) || 0) + w);
+  };
+  try {
+    const [likesRes, viewsRes] = await Promise.all([
+      supabaseAdmin.from('video_likes')
+        .select('video:videos!video_id(tags, creator_id)')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(80),
+      supabaseAdmin.from('video_views')
+        .select('video:videos!video_id(tags, creator_id)')
+        .eq('viewer_key', `u:${userId}`)
+        .eq('completed', true)
+        .order('created_at', { ascending: false })
+        .limit(120),
+    ]);
+    for (const l of (likesRes.data || [])) addVideo(l.video, 3);
+    for (const vv of (viewsRes.data || [])) addVideo(vv.video, 2);
+  } catch (_) { /* pré-migration : pas d'historique → fil non personnalisé */ }
+  return prefs;
+}
+
 // Renvoie {price, is_locked, video_url} : masque l'URL si vidéo payante non achetée
 function lockFields(v, priceMap, purchasedIds, userId) {
   const price = priceMap[v.id] || 0;
@@ -324,13 +360,34 @@ router.get('/', optionalAuth, async (req, res) => {
       videos = (videos || []).filter((v) => !blockedIds.has(v.creator?.id || v.creator_id));
     }
 
-    // Feed "frais" : sur la 1re page, on mélange l'ordre pour éviter de revoir
-    // toujours la même vidéo en tête (surtout quand il y a peu de contenu).
-    // Les vidéos boostées ciblées seront ensuite replacées en tête ci-dessous.
+    // ── Fil personnalisé "IA" : apprend des goûts du spectateur ────────────
+    // (hashtags + créateurs de ses likes et des vidéos qu'il regarde jusqu'au
+    // bout) et classe le fil par affinité + fraîcheur + un peu de hasard.
+    // Sans historique ou déconnecté : mélange aléatoire "frais" classique.
+    // Les vidéos boostées ciblées sont ensuite replacées en tête ci-dessous.
     if (page === 1 && !tag && !creatorId && Array.isArray(videos)) {
-      for (let i = videos.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [videos[i], videos[j]] = [videos[j], videos[i]];
+      const prefs = req.user ? await loadViewerPrefs(req.user.id) : null;
+      if (prefs && (prefs.tags.size > 0 || prefs.creators.size > 0)) {
+        const nowMs = Date.now();
+        videos = videos
+          .map((v) => {
+            let s = 0;
+            for (const t of (v.tags || [])) s += prefs.tags.get(String(t).toLowerCase()) || 0;
+            s += (prefs.creators.get(v.creator?.id) || 0) * 0.8;
+            // Fraîcheur : bonus dégressif sur ~7 jours
+            const ageH = (nowMs - new Date(v.created_at).getTime()) / 3.6e6;
+            s += Math.max(0, 3 - ageH / 56);
+            // Popularité douce + hasard pour que le fil varie à chaque visite
+            s += Math.log10(1 + (v.views || 0)) * 0.5 + Math.random() * 2;
+            return { v, s };
+          })
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.v);
+      } else {
+        for (let i = videos.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [videos[i], videos[j]] = [videos[j], videos[i]];
+        }
       }
     }
 

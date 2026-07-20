@@ -118,4 +118,43 @@ async function faststart(buffer) {
   }
 }
 
-module.exports = { enqueueHls, faststart, isConfigured: () => !!ffmpegPath };
+// ── Rattrapage : vidéos publiées AVANT l'activation du HLS (hls_url vide) ──
+// Convertit 2 vidéos par passe (préserve le CPU du plan B1), re-vérifie
+// toutes les 10 minutes jusqu'à ce que tout le catalogue soit adaptatif.
+let backfillRunning = false;
+async function backfillHls() {
+  if (!ffmpegPath || backfillRunning) return;
+  backfillRunning = true;
+  try {
+    const { data: vids, error } = await supabaseAdmin
+      .from('videos')
+      .select('id, creator_id, storage_path')
+      .eq('status', 'published')
+      .is('hls_url', null)
+      .order('created_at', { ascending: false })
+      .limit(2);
+    if (error || !vids || vids.length === 0) return;
+    console.log(`[HLS] rattrapage : ${vids.length} vidéo(s) sans version adaptative`);
+    for (const v of vids) {
+      if (!v.storage_path) continue;
+      const { data: file, error: dlErr } = await supabaseAdmin.storage
+        .from(BUCKET)
+        .download(v.storage_path);
+      if (dlErr || !file) continue;
+      enqueueHls(v.id, v.creator_id, Buffer.from(await file.arrayBuffer()));
+    }
+    await chain; // attend la fin de la passe avant d'autoriser la suivante
+  } catch (e) {
+    console.error('[HLS] rattrapage erreur:', e.message);
+  } finally {
+    backfillRunning = false;
+  }
+}
+
+if (ffmpegPath) {
+  setTimeout(backfillHls, 60 * 1000); // 1 min après le boot
+  const t = setInterval(backfillHls, 10 * 60 * 1000);
+  if (t.unref) t.unref();
+}
+
+module.exports = { enqueueHls, faststart, backfillHls, isConfigured: () => !!ffmpegPath };
