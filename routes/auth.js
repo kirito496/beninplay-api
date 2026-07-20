@@ -178,7 +178,13 @@ router.post('/email/request', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Adresse email invalide' });
     }
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    emailOtpStore.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    // Persistant en base (otp_codes) : robuste aux redémarrages / multi-process
+    // d'Azure. La mémoire vive n'est pas partagée entre process → codes perdus.
+    await supabaseAdmin.from('otp_codes').delete().eq('phone', email);
+    await supabaseAdmin
+      .from('otp_codes')
+      .insert({ phone: email, code, used: false, expires_at: expiresAt });
 
     const r = await sendVerificationCode(email, code);
     console.log(`[Auth] code email ${email} = ${code} (envoyé: ${r.sent})`);
@@ -207,11 +213,22 @@ router.post('/email/verify', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email et code requis' });
     }
 
-    const stored = emailOtpStore.get(email);
-    if (!stored || stored.code !== code || Date.now() > stored.expiresAt) {
+    // Relecture depuis la base (otp_codes) : fonctionne quel que soit le process
+    // Azure qui répond, ou après un redémarrage du serveur.
+    const { data: otpRow } = await supabaseAdmin
+      .from('otp_codes')
+      .select('id')
+      .eq('phone', email)
+      .eq('code', code)
+      .eq('used', false)
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!otpRow) {
       return res.status(400).json({ success: false, message: 'Code invalide ou expiré' });
     }
-    emailOtpStore.delete(email);
+    await supabaseAdmin.from('otp_codes').update({ used: true }).eq('id', otpRow.id);
 
     // Un seul compte par email (unique) → un seul compte peut monétiser
     let { data: user } = await supabaseAdmin.from('users').select('*').eq('email', email).single();
