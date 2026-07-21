@@ -1252,10 +1252,18 @@ router.get('/:id/comments', async (req, res) => {
       return res.status(500).json({ success: false, message: 'Erreur lors du chargement des commentaires' });
     }
 
+    // Aplati le nom/avatar de l'auteur : l'app lit author_name directement.
+    const flat = (comments || []).map((c) => ({
+      ...c,
+      author_name: c.user?.username || 'Utilisateur',
+      author_avatar: c.user?.avatar_url || null,
+      author_id: c.user?.id || null,
+    }));
+
     return res.json({
       success: true,
-      comments,
-      pagination: { page, limit, hasMore: comments.length === limit },
+      comments: flat,
+      pagination: { page, limit, hasMore: flat.length === limit },
     });
   } catch (err) {
     console.error('[Videos] comments list erreur:', err.message);
