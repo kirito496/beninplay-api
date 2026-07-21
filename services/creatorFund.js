@@ -2,74 +2,77 @@
 
 // ── Fonds créateur : paie les créateurs pour les VUES et les LIKES ──────────
 //
-// Utilise le portefeuille existant (users.wallet_balance + RPC
-// increment_wallet_balance + table transactions). AUCUNE migration SQL requise.
+// Montants FRACTIONNAIRES (ex: 0,75 FCFA / like). On accumule les centimes
+// dans users.pending_earnings et on ne déplace QUE des FCFA entiers vers
+// wallet_balance (fonction SQL atomique add_creator_earning). Le reste est
+// gardé pour la prochaine fois → aucun centime perdu, aucun sur-paiement.
 //
 // Réglages (variables d'environnement Azure, facultatives) :
-//   CREATOR_FUND_ENABLED  = "true" (défaut) | "false"
-//   CREATOR_RPM           = FCFA pour 1000 vues   (défaut 100)
-//   CREATOR_PER_LIKE      = FCFA par like          (défaut 1)
+//   CREATOR_FUND_ENABLED = "true" (défaut) | "false"
+//   CREATOR_PER_LIKE     = FCFA par like   (défaut 0.75  ← ton prix max)
+//   CREATOR_PER_VIEW     = FCFA par vue    (défaut 0.05)
 //
-// ⚠️ C'est un « fonds créateur » : cet argent sort de ta trésorerie. Finance-le
-// avec les revenus pub/boost. Baisse les taux si besoin (ou mets ENABLED=false).
+// ⚠️ Cet argent sort de ta trésorerie : finance-le avec les revenus pub/boost.
+// Nécessite la migration database/creator_fund.sql (colonne + fonction).
 
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('./supabase');
 
 const ENABLED = process.env.CREATOR_FUND_ENABLED !== 'false';
-const RPM = Math.max(0, parseInt(process.env.CREATOR_RPM || '100', 10)); // FCFA / 1000 vues
-const PER_LIKE = Math.max(0, parseInt(process.env.CREATOR_PER_LIKE || '1', 10)); // FCFA / like
-// Nombre de vues pour gagner 1 FCFA (ex: RPM 100 → 1 FCFA toutes les 10 vues).
-const VIEWS_PER_FCFA = RPM > 0 ? Math.max(1, Math.round(1000 / RPM)) : 0;
+const PER_LIKE = Math.max(0, parseFloat(process.env.CREATOR_PER_LIKE || '0.75'));
+const PER_VIEW = Math.max(0, parseFloat(process.env.CREATOR_PER_VIEW || '0.05'));
 
 async function _credit(userId, amount, description) {
   if (!userId || amount <= 0) return;
-  // Crédit du solde (RPC, avec repli lecture/écriture).
-  const { error } = await supabaseAdmin.rpc('increment_wallet_balance', {
-    user_id: userId,
-    amount,
-  });
-  if (error) {
-    const { data: u } = await supabaseAdmin
-      .from('users').select('wallet_balance').eq('id', userId).single();
-    if (u) {
-      await supabaseAdmin.from('users')
-        .update({ wallet_balance: (u.wallet_balance || 0) + amount }).eq('id', userId);
-    }
-  }
-  // Trace comptable (best-effort, non bloquant).
-  supabaseAdmin.from('transactions').insert({
-    id: uuidv4(),
-    user_id: userId,
-    type: 'earning',
-    amount,
-    net_amount: amount,
-    status: 'completed',
-    description,
-    created_at: new Date().toISOString(),
-  }).then(() => {}, () => {});
-}
-
-/** Appelé à chaque NOUVELLE vue unique. `newViews` = compteur de vues après incrément. */
-async function onView({ creatorId, viewerId, newViews }) {
   try {
-    if (!ENABLED || VIEWS_PER_FCFA === 0) return;
-    if (!creatorId || creatorId === viewerId) return; // pas payé pour ses propres vues
-    if (newViews > 0 && newViews % VIEWS_PER_FCFA === 0) {
-      await _credit(creatorId, 1, `Gains vues (${RPM} FCFA / 1000 vues)`);
+    // Accumule le montant fractionnaire ; renvoie les FCFA ENTIERS versés au
+    // portefeuille (0 si on n'a pas encore atteint 1 FCFA).
+    const { data: flushed, error } = await supabaseAdmin.rpc('add_creator_earning', {
+      p_user: userId,
+      p_amount: amount,
+    });
+    if (error) {
+      // Repli (migration pas encore exécutée) : on ne verse que les montants
+      // ≥ 1 FCFA pour ne rien sur-payer ; les fractions attendront la migration.
+      if (amount >= 1) {
+        await supabaseAdmin.rpc('increment_wallet_balance', {
+          user_id: userId,
+          amount: Math.floor(amount),
+        }).then(() => {}, () => {});
+      }
+      return;
+    }
+    const whole = typeof flushed === 'number' ? flushed : parseInt(flushed || '0', 10);
+    if (whole > 0) {
+      // Une trace comptable par FCFA entier versé (pas par centime) → peu de lignes.
+      supabaseAdmin.from('transactions').insert({
+        id: uuidv4(),
+        user_id: userId,
+        type: 'earning',
+        amount: whole,
+        net_amount: whole,
+        status: 'completed',
+        description,
+        created_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
     }
   } catch (_) { /* jamais bloquant */ }
+}
+
+/** Appelé à chaque NOUVELLE vue unique. */
+async function onView({ creatorId, viewerId }) {
+  if (!ENABLED || PER_VIEW <= 0) return;
+  if (!creatorId || creatorId === viewerId) return; // pas payé pour ses propres vues
+  await _credit(creatorId, PER_VIEW, 'Gains vues');
 }
 
 /** Appelé quand un spectateur AIME (nouveau like). */
 async function onLike({ creatorId, likerId }) {
-  try {
-    if (!ENABLED || PER_LIKE <= 0) return;
-    if (!creatorId || creatorId === likerId) return;
-    await _credit(creatorId, PER_LIKE, 'Gains like');
-  } catch (_) { /* jamais bloquant */ }
+  if (!ENABLED || PER_LIKE <= 0) return;
+  if (!creatorId || creatorId === likerId) return;
+  await _credit(creatorId, PER_LIKE, 'Gains likes');
 }
 
-const rate = { ENABLED, RPM, PER_LIKE, VIEWS_PER_FCFA };
+const rate = { ENABLED, PER_LIKE, PER_VIEW };
 
 module.exports = { onView, onLike, rate };
