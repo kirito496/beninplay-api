@@ -28,6 +28,8 @@ const liveRoutes = require('./routes/live');
 const notificationsRoutes = require('./routes/notifications');
 const shareRoutes = require('./routes/share');
 const giftsRoutes = require('./routes/gifts');
+const storiesRoutes = require('./routes/stories');
+const aiRoutes = require('./routes/ai');
 
 // WebSocket
 const { initWebSocketServer } = require('./websocket/chat');
@@ -110,6 +112,8 @@ app.use('/api/monetization', monetizationRoutes);
 app.use('/api/live', liveRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/gifts', giftsRoutes);
+app.use('/api/stories', storiesRoutes);
+app.use('/api/ai', aiRoutes);
 app.use('/v', shareRoutes);
 
 // ============================================================
