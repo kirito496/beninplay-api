@@ -195,6 +195,70 @@ async function backfillLight() {
   }
 }
 
+// ── Pré-traitement à l'upload : TRIM (couper début/fin) + MUSIQUE ───────────
+// Rapide sur un petit serveur : la vidéo est COPIÉE sans ré-encodage
+// (-c:v copy) ; seule la piste audio est ré-encodée quand on mixe une musique.
+// Renvoie le nouveau buffer, ou null si rien à faire / échec (on garde alors
+// le fichier d'origine — jamais bloquant).
+async function preprocess(buffer, { trimStart = 0, trimEnd = 0, musicUrl = null } = {}) {
+  if (!ffmpegPath || !buffer) return null;
+  const hasTrim = trimStart > 0 || trimEnd > 0;
+  if (!hasTrim && !musicUrl) return null;
+  const work = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'prep-'));
+  try {
+    const input = path.join(work, 'in.mp4');
+    const output = path.join(work, 'out.mp4');
+    await fs.promises.writeFile(input, buffer);
+
+    let musicPath = null;
+    if (musicUrl) {
+      const resp = await fetch(musicUrl);
+      if (resp.ok) {
+        musicPath = path.join(work, 'music.mp4');
+        await fs.promises.writeFile(musicPath, Buffer.from(await resp.arrayBuffer()));
+      }
+    }
+
+    const seek = [];
+    if (hasTrim) {
+      if (trimStart > 0) seek.push('-ss', String(trimStart));
+      if (trimEnd > trimStart) seek.push('-t', String(trimEnd - trimStart));
+    }
+
+    if (musicPath) {
+      const mixArgs = [
+        '-y', ...seek, '-i', input, '-i', musicPath,
+        '-filter_complex', '[1:a]volume=0.6[m];[0:a][m]amix=inputs=2:duration=first[a]',
+        '-map', '0:v', '-map', '[a]',
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart', output,
+      ];
+      try {
+        await run(mixArgs, work);
+      } catch (_) {
+        // Vidéo sans piste audio → on REMPLACE l'audio par la musique.
+        await run([
+          '-y', ...seek, '-i', input, '-i', musicPath,
+          '-map', '0:v', '-map', '1:a',
+          '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+          '-shortest', '-movflags', '+faststart', output,
+        ], work);
+      }
+    } else {
+      // Trim seul : copie de flux (très rapide, coupe au plus proche keyframe).
+      await run(['-y', ...seek, '-i', input, '-c', 'copy', '-movflags', '+faststart', output], work);
+    }
+
+    const out = await fs.promises.readFile(output);
+    return out.length > 0 ? out : null;
+  } catch (e) {
+    console.warn('[Prep] trim/musique impossible (fichier d\'origine conservé):', e.message);
+    return null;
+  } finally {
+    fs.promises.rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ── Duo / Stitch : compose la vidéo de l'utilisateur avec la vidéo source ────
 // Best-effort : si ffmpeg échoue (codecs, pas d'audio…), on garde le clip de
 // l'utilisateur tel quel (publié et crédité). Jamais bloquant.
@@ -274,4 +338,4 @@ if (ffmpegPath) {
   if (t.unref) t.unref();
 }
 
-module.exports = { enqueueHls, enqueueLight, faststart, backfillLight, enqueueCompose, isConfigured: () => !!ffmpegPath };
+module.exports = { enqueueHls, enqueueLight, faststart, backfillLight, enqueueCompose, preprocess, isConfigured: () => !!ffmpegPath };

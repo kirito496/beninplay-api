@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
-const { enqueueLight, faststart, enqueueCompose } = require('../services/transcode');
+const { enqueueLight, faststart, enqueueCompose, preprocess } = require('../services/transcode');
 const creatorFund = require('../services/creatorFund');
 
 const router = express.Router();
@@ -167,6 +167,25 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
     // allers-retours réseau avant de démarrer. Remux en copie de flux
     // (rapide, sans ré-encodage). En cas d'échec : fichier d'origine.
     let videoBuffer = videoFile.buffer;
+
+    // ── Trim (couper début/fin) + Musique (mixée par-dessus) ──
+    // Choisis dans l'éditeur. Copie de flux vidéo → rapide même sur B1.
+    const trimStart = Math.max(0, parseFloat(req.body.trim_start) || 0);
+    const trimEnd = Math.max(0, parseFloat(req.body.trim_end) || 0);
+    const musicSoundId = (req.body.music_sound_id || '').toString() || null;
+    let musicUrl = null;
+    if (musicSoundId) {
+      try {
+        const { data: snd } = await supabaseAdmin
+          .from('sounds').select('audio_url').eq('id', musicSoundId).single();
+        musicUrl = snd?.audio_url || null;
+      } catch (_) { /* table sounds absente : ignoré */ }
+    }
+    if (trimStart > 0 || trimEnd > 0 || musicUrl) {
+      const prepped = await preprocess(videoBuffer, { trimStart, trimEnd, musicUrl });
+      if (prepped) videoBuffer = prepped;
+    }
+
     if (['video/mp4', 'video/quicktime'].includes(videoFile.mimetype)) {
       const fast = await faststart(videoBuffer);
       if (fast) videoBuffer = fast;
@@ -259,7 +278,8 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
     // + zone et prix (colonnes optionnelles : présentes après la migration)
     const priceVal = Math.max(0, parseInt(req.body.price, 10) || 0);
     // Son choisi + références Duo/Stitch (colonnes optionnelles).
-    const providedSound = (req.body.sound_id || '').toString() || null;
+    // La musique mixée dans l'éditeur compte aussi comme « son » de la vidéo.
+    const providedSound = (req.body.sound_id || '').toString() || musicSoundId;
     const duetSrc = (req.body.duet_source_id || '').toString() || null;
     const stitchSrc = (req.body.stitch_source_id || '').toString() || null;
 
