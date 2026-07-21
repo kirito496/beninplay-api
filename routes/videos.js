@@ -7,6 +7,7 @@ const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
 const { enqueueLight, faststart } = require('../services/transcode');
+const creatorFund = require('../services/creatorFund');
 
 const router = express.Router();
 
@@ -968,6 +969,18 @@ router.post('/:id/view', optionalAuth, async (req, res) => {
           await supabaseAdmin.from('videos').update({ views: (v.views || 0) + 1 }).eq('id', id);
         }
       }
+      // Fonds créateur : paie le créateur pour cette nouvelle vue (par paliers).
+      try {
+        const { data: v2 } = await supabaseAdmin
+          .from('videos').select('views, creator_id').eq('id', id).single();
+        if (v2) {
+          await creatorFund.onView({
+            creatorId: v2.creator_id,
+            viewerId: req.user?.id,
+            newViews: v2.views || 0,
+          });
+        }
+      } catch (_) { /* non bloquant */ }
     }
     return res.json({ success: true, counted: counts });
   } catch (err) {
@@ -1098,6 +1111,8 @@ router.post('/:id/like', requireAuth, async (req, res) => {
         .update({ likes_count: video.likes_count + 1 })
         .eq('id', id);
       liked = true;
+      // Fonds créateur : paie le créateur pour ce like.
+      creatorFund.onLike({ creatorId: video.creator_id, likerId: req.user.id });
     }
 
     return res.json({
