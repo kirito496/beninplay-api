@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { getClientIp } = require('../services/geo');
-const { enqueueLight, faststart } = require('../services/transcode');
+const { enqueueLight, faststart, enqueueCompose } = require('../services/transcode');
 const creatorFund = require('../services/creatorFund');
 
 const router = express.Router();
@@ -258,12 +258,20 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
 
     // + zone et prix (colonnes optionnelles : présentes après la migration)
     const priceVal = Math.max(0, parseInt(req.body.price, 10) || 0);
+    // Son choisi + références Duo/Stitch (colonnes optionnelles).
+    const providedSound = (req.body.sound_id || '').toString() || null;
+    const duetSrc = (req.body.duet_source_id || '').toString() || null;
+    const stitchSrc = (req.body.stitch_source_id || '').toString() || null;
+
     const withZone = {
       ...videoData,
       zone: zone === 'dark' ? 'dark' : 'normal',
       price: priceVal,
       filter: filterVal,
       overlays: overlaysJson,
+      sound_id: providedSound,
+      duet_source_id: duetSrc,
+      stitch_source_id: stitchSrc,
     };
 
     let { data: video, error: dbError } = await supabaseAdmin
@@ -281,6 +289,40 @@ router.post('/upload', requireAuth, uploadFields, async (req, res) => {
       await supabaseAdmin.storage.from(bucket).remove([storagePath]);
       return res.status(500).json({ success: false, message: `Enregistrement impossible : ${dbError.message}` });
     }
+
+    // ── Son : réutilise le son choisi (Utiliser ce son), sinon crée le son
+    //    original de cette vidéo. Best-effort (table "sounds" facultative).
+    try {
+      if (providedSound) {
+        const { data: s } = await supabaseAdmin
+          .from('sounds').select('uses_count').eq('id', providedSound).single();
+        if (s) {
+          await supabaseAdmin.from('sounds')
+            .update({ uses_count: (s.uses_count || 0) + 1 }).eq('id', providedSound);
+        }
+      } else {
+        const { data: snd } = await supabaseAdmin.from('sounds').insert({
+          title: `Son original — ${title.trim().slice(0, 60)}`,
+          creator_id: req.user.id,
+          source_video_id: videoId,
+          audio_url: videoUrl,
+        }).select('id').single();
+        if (snd) await supabaseAdmin.from('videos').update({ sound_id: snd.id }).eq('id', videoId);
+      }
+    } catch (_) { /* table sounds absente : ignoré */ }
+
+    // ── Duo / Stitch : compose de façon ASYNCHRONE avec la vidéo source.
+    //    En attendant (ou si ffmpeg échoue), le clip est déjà publié et crédité.
+    try {
+      const srcId = duetSrc || stitchSrc;
+      if (srcId) {
+        const { data: src } = await supabaseAdmin
+          .from('videos').select('video_url').eq('id', srcId).single();
+        if (src?.video_url) {
+          enqueueCompose(videoId, req.user.id, videoBuffer, src.video_url, duetSrc ? 'duet' : 'stitch');
+        }
+      }
+    } catch (_) { /* non bloquant */ }
 
     // Publier est ouvert à tous. Le statut "créateur" (monétisation) reste
     // une demande spéciale à valider — il n'est PAS attribué automatiquement.

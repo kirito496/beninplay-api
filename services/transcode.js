@@ -195,10 +195,83 @@ async function backfillLight() {
   }
 }
 
+// ── Duo / Stitch : compose la vidéo de l'utilisateur avec la vidéo source ────
+// Best-effort : si ffmpeg échoue (codecs, pas d'audio…), on garde le clip de
+// l'utilisateur tel quel (publié et crédité). Jamais bloquant.
+async function _download(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`download source ${resp.status}`);
+  return Buffer.from(await resp.arrayBuffer());
+}
+
+async function _compose(mode, sourceBuf, clipBuf) {
+  const work = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'compose-'));
+  try {
+    const src = path.join(work, 'src.mp4');
+    const clip = path.join(work, 'clip.mp4');
+    const out = path.join(work, 'out.mp4');
+    await fs.promises.writeFile(src, sourceBuf);
+    await fs.promises.writeFile(clip, clipBuf);
+    let filter;
+    if (mode === 'duet') {
+      // Côte à côte (même hauteur 640), audio mixé.
+      filter =
+        '[0:v]scale=-2:640,setsar=1[l];[1:v]scale=-2:640,setsar=1[r];' +
+        '[l][r]hstack=inputs=2[v];' +
+        '[0:a][1:a]amix=inputs=2:duration=shortest[a]';
+    } else {
+      // Stitch : source PUIS clip, dans un même cadre 720x1280.
+      const norm =
+        'scale=720:1280:force_original_aspect_ratio=decrease,' +
+        'pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1';
+      filter =
+        `[0:v]${norm}[v0];[1:v]${norm}[v1];[v0][v1]concat=n=2:v=1:a=0[v];` +
+        '[0:a][1:a]concat=n=2:v=0:a=1[a]';
+    }
+    await run([
+      '-y', '-i', src, '-i', clip,
+      '-filter_complex', filter,
+      '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+      '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart',
+      out,
+    ], work);
+    const data = await fs.promises.readFile(out);
+    if (!data.length) throw new Error('sortie vide');
+    return data;
+  } finally {
+    fs.promises.rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function composeAndSwap(videoId, creatorId, clipBuffer, sourceUrl, mode) {
+  const sourceBuf = await _download(sourceUrl);
+  const composed = await _compose(mode, sourceBuf, clipBuffer);
+  const dest = `videos/${creatorId}/${videoId}/${mode}.mp4`;
+  const { error: upErr } = await supabaseAdmin.storage
+    .from(BUCKET).upload(dest, composed, { contentType: 'video/mp4', upsert: true });
+  if (upErr) throw new Error(`upload ${mode}: ${upErr.message}`);
+  const { data: pub } = supabaseAdmin.storage.from(BUCKET).getPublicUrl(dest);
+  // La vidéo devient la version composée ; hls_url remis à null → le
+  // rattrapage régénère la version légère plus tard.
+  await supabaseAdmin.from('videos')
+    .update({ video_url: pub.publicUrl, storage_path: dest, hls_url: null })
+    .eq('id', videoId);
+  console.log(`[${mode}] ${videoId} composé (${Math.round(composed.length / 1024)} Ko)`);
+}
+
+function enqueueCompose(videoId, creatorId, clipBuffer, sourceUrl, mode) {
+  if (!ffmpegPath || !clipBuffer || !videoId || !sourceUrl) return;
+  chain = chain
+    .then(() => composeAndSwap(videoId, creatorId, clipBuffer, sourceUrl, mode))
+    .catch((e) => console.error(`[${mode}]`, videoId, 'échec (clip conservé):', e.message));
+}
+
 if (ffmpegPath) {
   setTimeout(backfillLight, 60 * 1000); // 1 min après le boot
   const t = setInterval(backfillLight, 10 * 60 * 1000);
   if (t.unref) t.unref();
 }
 
-module.exports = { enqueueHls, enqueueLight, faststart, backfillLight, isConfigured: () => !!ffmpegPath };
+module.exports = { enqueueHls, enqueueLight, faststart, backfillLight, enqueueCompose, isConfigured: () => !!ffmpegPath };
