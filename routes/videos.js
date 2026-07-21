@@ -318,6 +318,17 @@ router.get('/', optionalAuth, async (req, res) => {
     const tag = req.query.tag;
     const creatorId = req.query.creator_id;
 
+    // Vidéos déjà vues par ce spectateur (envoyées par l'app) : on ne les
+    // reproposera JAMAIS tant qu'il en reste des nouvelles → à chaque
+    // rafraîchissement, le fil montre d'autres vidéos.
+    const excludeIds = new Set(
+      String(req.query.exclude || '')
+        .split(',').map((s) => s.trim()).filter(Boolean).slice(0, 300)
+    );
+    // Quand on exclut les vidéos vues, on élargit la fenêtre de départ pour
+    // quand même remplir une page complète de vidéos "fraîches".
+    const fetchCount = excludeIds.size > 0 ? Math.min(80, limit * 4) : limit;
+
     const selectWithZone = `
         id, title, description, video_url, thumbnail_url, tags, zone,
         views, likes_count, comments_count, shares_count, created_at,
@@ -333,7 +344,7 @@ router.get('/', optionalAuth, async (req, res) => {
         .select(sel)
         .eq('status', 'published')
         .order('created_at', { ascending: false })
-        .range(offset, offset + limit - 1);
+        .range(offset, offset + fetchCount - 1);
       if (tag) q = q.contains('tags', [tag.toLowerCase()]);
       if (creatorId) q = q.eq('creator_id', creatorId);
       return q;
@@ -359,6 +370,11 @@ router.get('/', optionalAuth, async (req, res) => {
     const blockedIds = await loadBlockedIds(req.user?.id);
     if (blockedIds.size > 0) {
       videos = (videos || []).filter((v) => !blockedIds.has(v.creator?.id || v.creator_id));
+    }
+
+    // Ne jamais reproposer une vidéo déjà vue (IDs envoyés par l'app).
+    if (excludeIds.size > 0) {
+      videos = (videos || []).filter((v) => !excludeIds.has(v.id));
     }
 
     // ── Fil personnalisé "IA" : apprend des goûts du spectateur ────────────
@@ -492,6 +508,10 @@ router.get('/', optionalAuth, async (req, res) => {
         .in('video_id', videoIds);
       if (likes) likedVideoIds = new Set(likes.map((l) => l.video_id));
     }
+
+    // On a pu élargir la fenêtre (exclusion des vues) : on ne renvoie au plus
+    // qu'une page complète, en gardant les vidéos boostées placées en tête.
+    videos = videos.slice(0, limit);
 
     const nowMs = Date.now();
     const { priceMap, purchasedIds } = await loadPaywall(videos, req.user?.id);
