@@ -469,6 +469,26 @@ router.post('/creator/apply', requireAuth, async (req, res) => {
     if (req.user.is_creator) {
       return res.status(400).json({ success: false, message: 'Tu es déjà créateur' });
     }
+
+    // ── Clause d'éligibilité : minimum d'abonnés requis (défaut 10 000).
+    //    Réglable via la variable d'env CREATOR_MIN_FOLLOWERS (0 = désactivé).
+    const minFollowers = Math.max(0, parseInt(process.env.CREATOR_MIN_FOLLOWERS || '10000', 10));
+    if (minFollowers > 0) {
+      const { count } = await supabaseAdmin
+        .from('follows')
+        .select('*', { count: 'exact', head: true })
+        .eq('following_id', req.user.id);
+      const followers = count || 0;
+      if (followers < minFollowers) {
+        return res.status(400).json({
+          success: false,
+          followers,
+          required: minFollowers,
+          message: `Il te faut au moins ${minFollowers.toLocaleString('fr-FR')} abonnés pour devenir créateur (tu en as ${followers.toLocaleString('fr-FR')}). Continue à publier, tu y es presque ! 💪`,
+        });
+      }
+    }
+
     const note = (req.body?.message || '').toString().slice(0, 500);
     const { error } = await supabaseAdmin
       .from('users')

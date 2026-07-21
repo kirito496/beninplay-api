@@ -105,17 +105,31 @@ async function act(path, okMsg) {
   catch(e){ if(e.message!=='401') toast('Erreur'); }
 }
 
-async function load() {
+async function load(silent) {
   if (!key()) { $('#list').innerHTML = '<div class="empty">Entre ta clé admin d\'abord.</div>'; return; }
-  $('#list').innerHTML = '<div class="empty">Chargement…</div>'; $('#count').textContent='';
+  // En mode silencieux (auto-actualisation), on garde la liste affichée
+  // pendant le rechargement → pas de clignotement.
+  if (!silent) { $('#list').innerHTML = '<div class="empty">Chargement…</div>'; $('#count').textContent=''; }
   try {
-    if (TAB === 'withdrawals') return renderWithdrawals(await api('/api/wallet/admin/withdrawals?status=pending'));
-    if (TAB === 'kyc')         return renderKyc(await api('/api/dark/kyc/pending'));
-    if (TAB === 'creators')    return renderCreators(await api('/api/auth/creator/requests'));
-    if (TAB === 'flagged')     return renderFlagged(await api('/api/monetization/flagged'));
-    if (TAB === 'reports')     return renderReports(await api('/api/videos/admin/reports'));
-  } catch(e){ if(e.message!=='401') $('#list').innerHTML='<div class="empty">Erreur de chargement</div>'; }
+    if (TAB === 'withdrawals') { renderWithdrawals(await api('/api/wallet/admin/withdrawals?status=pending')); }
+    else if (TAB === 'kyc')      { renderKyc(await api('/api/dark/kyc/pending')); }
+    else if (TAB === 'creators') { renderCreators(await api('/api/auth/creator/requests')); }
+    else if (TAB === 'flagged')  { renderFlagged(await api('/api/monetization/flagged')); }
+    else if (TAB === 'reports')  { renderReports(await api('/api/videos/admin/reports')); }
+    stamp();
+  } catch(e){ if(e.message!=='401' && !silent) $('#list').innerHTML='<div class="empty">Erreur de chargement</div>'; }
 }
+
+// ── Auto-actualisation : recharge l'onglet courant toutes les 30 s ──────────
+// (en pause quand la fenêtre est cachée ; rechargement immédiat au retour)
+function stamp(){
+  const d = new Date();
+  $('#count').textContent += ' • MAJ ' + d.toLocaleTimeString('fr-FR');
+}
+setInterval(() => { if (!document.hidden && key()) load(true); }, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && key()) load(true);
+});
 
 function empty(m){ return '<div class="empty">'+m+'</div>'; }
 function setCount(n){ $('#count').textContent = n + ' élément' + (n>1?'s':''); }
