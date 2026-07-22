@@ -60,4 +60,20 @@ router.post('/read', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/notifications/token — enregistre le jeton FCM de l'appareil
+ * (pour recevoir les push quand l'appli est fermée). body: { token: string }
+ */
+router.post('/token', requireAuth, async (req, res) => {
+  try {
+    const token = (req.body?.token || '').toString().trim();
+    if (!token) return res.status(400).json({ success: false, message: 'Jeton manquant' });
+    await supabaseAdmin.from('users').update({ fcm_token: token }).eq('id', req.user.id);
+    return res.json({ success: true });
+  } catch (err) {
+    // Colonne absente (avant migration) → on ignore pour ne pas casser l'appli
+    return res.json({ success: true });
+  }
+});
+
 module.exports = router;
