@@ -86,24 +86,27 @@ async function accessToken() {
 }
 
 /**
- * Envoie une notification push à un utilisateur (via son jeton FCM enregistré).
+ * Envoie une notification push à un utilisateur et RENVOIE le résultat détaillé
+ * (utile pour l'auto-test). Codes `reason` : not_configured | no_token |
+ * no_access | fcm_error | ok.
  * @param {string} userId  destinataire
  * @param {object} msg     { title, body?, data? }
+ * @returns {Promise<{ok: boolean, reason: string, status?: number, detail?: string}>}
  */
-async function sendPush(userId, msg) {
+async function sendPushResult(userId, msg) {
   try {
-    if (!userId || !isConfigured() || !msg || !msg.title) return;
+    if (!userId || !msg || !msg.title) return { ok: false, reason: 'bad_request' };
+    if (!isConfigured()) return { ok: false, reason: 'not_configured' };
 
     const { data: user } = await supabaseAdmin
       .from('users').select('fcm_token').eq('id', userId).single();
     const token = user && user.fcm_token;
-    if (!token) return;
+    if (!token) return { ok: false, reason: 'no_token' };
 
     const access = await accessToken();
-    if (!access) return;
+    if (!access) return { ok: false, reason: 'no_access' };
 
     const sa = serviceAccount();
-    // Les data doivent être des chaînes pour FCM.
     const data = {};
     for (const [k, v] of Object.entries(msg.data || {})) data[k] = String(v);
 
@@ -123,16 +126,28 @@ async function sendPush(userId, msg) {
       }
     );
     if (!res.ok) {
-      const t = await res.text().catch(() => '');
+      const detail = await res.text().catch(() => '');
       // Jeton périmé/invalide → on le nettoie pour ne plus réessayer.
       if (res.status === 404 || res.status === 400) {
         try { await supabaseAdmin.from('users').update({ fcm_token: null }).eq('id', userId); } catch (_) {}
       }
-      console.error('[Push] envoi échoué:', res.status, t.slice(0, 120));
+      console.error('[Push] envoi échoué:', res.status, detail.slice(0, 120));
+      return { ok: false, reason: 'fcm_error', status: res.status, detail: detail.slice(0, 200) };
     }
+    return { ok: true, reason: 'ok' };
   } catch (err) {
     console.error('[Push] erreur (ignorée):', err.message);
+    return { ok: false, reason: 'exception', detail: err.message };
   }
 }
 
-module.exports = { sendPush, isConfigured };
+/**
+ * Envoie une notification push (best-effort, sans valeur de retour).
+ * @param {string} userId  destinataire
+ * @param {object} msg     { title, body?, data? }
+ */
+async function sendPush(userId, msg) {
+  await sendPushResult(userId, msg).catch(() => {});
+}
+
+module.exports = { sendPush, sendPushResult, isConfigured };
