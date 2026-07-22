@@ -3,6 +3,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth } = require('../middleware/auth');
+const { sendPushResult, isConfigured } = require('../services/push');
 
 const router = express.Router();
 
@@ -74,6 +75,35 @@ router.post('/token', requireAuth, async (req, res) => {
     // Colonne absente (avant migration) → on ignore pour ne pas casser l'appli
     return res.json({ success: true });
   }
+});
+
+/**
+ * POST /api/notifications/test — s'envoie un push de test À SOI-MÊME.
+ * Renvoie un diagnostic clair pour vérifier la config (Azure + jeton).
+ */
+router.post('/test', requireAuth, async (req, res) => {
+  const configured = isConfigured();
+  const r = await sendPushResult(req.user.id, {
+    title: '🔔 BeninPlay',
+    body: 'Test de notification réussi !',
+    data: { type: 'test' },
+  });
+  // Messages lisibles selon le cas.
+  const messages = {
+    not_configured: "FCM n'est pas configuré sur le serveur (variable FCM_SERVICE_ACCOUNT manquante ou invalide sur Azure).",
+    no_token: "Aucun appareil enregistré pour ce compte. Ouvre l'appli sur ton téléphone (connecté) puis réessaie.",
+    no_access: "Impossible d'obtenir un jeton Google (clé de service invalide ?).",
+    fcm_error: `FCM a refusé l'envoi (${r.status}). ${r.detail || ''}`,
+    exception: `Erreur serveur : ${r.detail || ''}`,
+    ok: 'Push envoyé ✅ — regarde la barre de notifications de ton téléphone.',
+    bad_request: 'Requête invalide.',
+  };
+  return res.json({
+    success: r.ok,
+    configured,
+    reason: r.reason,
+    message: messages[r.reason] || r.reason,
+  });
 });
 
 module.exports = router;
