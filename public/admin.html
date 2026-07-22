@@ -61,6 +61,7 @@
     <button data-tab="creators" onclick="go('creators')">⭐ Créateurs</button>
     <button data-tab="flagged" onclick="go('flagged')">🚩 Signalés</button>
     <button data-tab="reports" onclick="go('reports')">🛡️ Modération</button>
+    <button data-tab="challenges" onclick="go('challenges')">🏆 Défis</button>
   </div>
 
   <div class="count" id="count"></div>
@@ -116,6 +117,7 @@ async function load(silent) {
     else if (TAB === 'creators') { renderCreators(await api('/api/auth/creator/requests')); }
     else if (TAB === 'flagged')  { renderFlagged(await api('/api/monetization/flagged')); }
     else if (TAB === 'reports')  { renderReports(await api('/api/videos/admin/reports')); }
+    else if (TAB === 'challenges') { renderChallenges(await api('/api/challenges')); }
     stamp();
   } catch(e){ if(e.message!=='401' && !silent) $('#list').innerHTML='<div class="empty">Erreur de chargement</div>'; }
 }
@@ -231,6 +233,53 @@ function renderReports(d) {
         <button class="ghost" onclick="reportAct('${r.id}','dismiss','Classé')">✓ Sans suite</button>
       </div></div>`;
   }).join('');
+}
+
+// ── Défis à Cagnotte ────────────────────────────────────────────────────────
+function renderChallenges(d) {
+  const actv = d.active || [], done = d.finished || [];
+  setCount(actv.length);
+  const form = `<div class="card">
+    <div class="big">🏆 Lancer un défi</div>
+    <div class="mut" style="margin:8px 0 4px">Hashtag (sans #), titre, cagnotte FCFA, durée en jours :</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="ch_tag" placeholder="defidansebenin" style="flex:2;min-width:120px">
+      <input id="ch_title" placeholder="Défi Danse Bénin 💃" style="flex:3;min-width:150px">
+      <input id="ch_prize" type="number" placeholder="10000" style="flex:1;min-width:80px">
+      <input id="ch_days" type="number" placeholder="7" style="flex:1;min-width:60px">
+    </div>
+    <div class="actions"><button class="g" onclick="createChallenge()">🚀 Lancer</button></div>
+  </div>`;
+  const actHtml = actv.map(c => {
+    const end = new Date(c.ends_at).toLocaleString('fr-FR');
+    const rows = (c.leaderboard || []).slice(0, 5).map((r, i) =>
+      `<div class="mut">${i + 1}. @${esc(r.creator_name)} — ${esc(r.likes)} ❤️ · ${esc(r.views)} vues</div>`).join('');
+    return `<div class="card">
+      <div class="row"><div class="big">#${esc(c.hashtag)} — ${esc(c.title)}</div>
+        <div class="amount">${esc(c.prize_pool)} FCFA</div></div>
+      <div class="mut">Fin : ${esc(end)} · Répartition 50/30/20 entre 3 créateurs</div>
+      ${rows || '<div class="mut">Aucune participation pour l\'instant.</div>'}
+      <div class="actions">
+        <button class="r" onclick="act('/api/challenges/${c.id}/finish','Clôturé, gagnants payés')">🏁 Clôturer maintenant (paie)</button>
+      </div></div>`;
+  }).join('');
+  const doneHtml = done.map(c => {
+    const win = (c.winners || []).map(w => `${w.rank}. @${esc(w.creator_name)} (+${esc(w.prize)} F)`).join(' · ');
+    return `<div class="card"><div class="row"><div>✅ #${esc(c.hashtag)}</div>
+      <div class="mut">${esc(c.prize_pool)} FCFA</div></div>
+      <div class="mut">${win || 'Aucun gagnant'}</div></div>`;
+  }).join('');
+  $('#list').innerHTML = form + actHtml + (doneHtml ? '<div class="mut" style="margin:12px 4px 6px">Défis terminés :</div>' + doneHtml : '');
+}
+
+async function createChallenge() {
+  const body = {
+    hashtag: $('#ch_tag').value, title: $('#ch_title').value,
+    prize_pool: parseInt($('#ch_prize').value, 10) || 0,
+    days: parseInt($('#ch_days').value, 10) || 7,
+  };
+  try { const r = await api('/api/challenges', 'POST', body); toast(r.message || 'Défi lancé'); load(); }
+  catch (e) { if (e.message !== '401') toast('Erreur'); }
 }
 
 // Auto : si une clé est déjà mémorisée, on charge

@@ -31,6 +31,7 @@ const giftsRoutes = require('./routes/gifts');
 const storiesRoutes = require('./routes/stories');
 const aiRoutes = require('./routes/ai');
 const soundsRoutes = require('./routes/sounds');
+const challengesRoutes = require('./routes/challenges');
 
 // WebSocket
 const { initWebSocketServer } = require('./websocket/chat');
@@ -116,6 +117,7 @@ app.use('/api/gifts', giftsRoutes);
 app.use('/api/stories', storiesRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/sounds', soundsRoutes);
+app.use('/api/challenges', challengesRoutes);
 app.use('/v', shareRoutes);
 
 // ============================================================

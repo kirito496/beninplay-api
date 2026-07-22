@@ -2,6 +2,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const { supabaseAdmin } = require('./supabase');
+const { sendPush } = require('./push');
 
 /**
  * Crée une notification pour un utilisateur (best-effort : n'interrompt jamais
@@ -27,6 +28,9 @@ async function notify(userId, n) {
   } catch (err) {
     console.error('[Notify] échec (ignoré):', err.message);
   }
+  // Push (téléphone) en plus de la notification in-app — best-effort, non bloquant.
+  sendPush(userId, { title: n.title, body: n.body, data: { type: n.type, ...(n.data || {}) } })
+    .catch(() => {});
 }
 
 module.exports = { notify };

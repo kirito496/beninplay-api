@@ -27,6 +27,21 @@ async function videosOfSound(soundId) {
   return (vids || []).map((v) => ({ ...v, creator_name: v.creator?.username || 'Créateur' }));
 }
 
+// GET /api/sounds → sons populaires (pour « Ajouter une musique » dans l'éditeur)
+router.get('/', optionalAuth, async (req, res) => {
+  try {
+    const { data: sounds } = await supabaseAdmin
+      .from('sounds')
+      .select('id, title, creator_id, source_video_id, uses_count, creator:users!creator_id(username, avatar_url)')
+      .not('audio_url', 'is', null)
+      .order('uses_count', { ascending: false })
+      .limit(30);
+    return res.json({ success: true, sounds: (sounds || []).map(pack) });
+  } catch (_) {
+    return res.json({ success: true, sounds: [] });
+  }
+});
+
 // GET /api/sounds/by-video/:videoId → le son utilisé par cette vidéo
 router.get('/by-video/:videoId', optionalAuth, async (req, res) => {
   try {
