@@ -446,6 +446,16 @@ router.get('/me', requireAuth, async (req, res) => {
         req.user.region_source = 'ip'; // approximatif
       }
     }
+    // Compteurs d'abonnés / abonnements (sinon le profil affiche toujours 0).
+    try {
+      const [{ count: followers }, { count: following }] = await Promise.all([
+        supabaseAdmin.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', req.user.id),
+        supabaseAdmin.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', req.user.id),
+      ]);
+      req.user.followers_count = followers || 0;
+      req.user.following_count = following || 0;
+    } catch (_) { /* table follows absente : compteurs a 0 */ }
+
     return res.json({ success: true, user: req.user });
   } catch (_) {
     return res.json({ success: true, user: req.user });
