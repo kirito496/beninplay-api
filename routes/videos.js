@@ -581,6 +581,7 @@ router.get('/', optionalAuth, async (req, res) => {
     const enrichedVideos = videos.map((v) => ({
       ...v,
       ...lockFields(v, priceMap, purchasedIds, req.user?.id),
+      creator_id: v.creator?.id || v.creator_id || null, // requis pour « Suivre »
       creator_name: v.creator?.username || 'Créateur',
       creator_avatar: v.creator?.avatar_url || null,
       creator_verified: v.creator?.is_creator === true,
