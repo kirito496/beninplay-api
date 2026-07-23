@@ -1,11 +1,18 @@
 'use strict';
 
 const express = require('express');
+const multer = require('multer');
 const { supabaseAdmin } = require('../services/supabase');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { notify } = require('../services/notify');
 
 const router = express.Router();
+
+// Upload photo de profil : image en mémoire (max 5 Mo) puis Supabase Storage.
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 /**
  * DELETE /api/users/me
@@ -368,6 +375,33 @@ router.post('/:id/follow', requireAuth, async (req, res) => {
     }
 
     return res.json({ success: true, following });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * POST /api/users/avatar — change la photo de profil.
+ * Reçoit un fichier image (champ 'avatar'), le stocke et met à jour avatar_url.
+ */
+router.post('/avatar', requireAuth, avatarUpload.single('avatar'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ success: false, message: 'Aucune image reçue' });
+    const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'videos';
+    const ext = (file.mimetype && file.mimetype.includes('png')) ? 'png' : 'jpg';
+    const path = `avatars/${req.user.id}_${Date.now()}.${ext}`;
+
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(bucket)
+      .upload(path, file.buffer, { contentType: file.mimetype || 'image/jpeg', upsert: true });
+    if (upErr) return res.status(500).json({ success: false, message: upErr.message });
+
+    const { data: pub } = supabaseAdmin.storage.from(bucket).getPublicUrl(path);
+    const avatarUrl = pub && pub.publicUrl;
+
+    await supabaseAdmin.from('users').update({ avatar_url: avatarUrl }).eq('id', req.user.id);
+    return res.json({ success: true, avatar_url: avatarUrl });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
