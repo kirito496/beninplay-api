@@ -431,4 +431,56 @@ router.post('/sticker', requireAuth, avatarUpload.single('sticker'), async (req,
   }
 });
 
+/**
+ * GET /api/users/interests — « Tes centres d'intérêt ».
+ * Montre ce que l'algo a appris de toi : thèmes (tags des vidéos aimées) et
+ * créateurs préférés, agrégés depuis tes likes. C'est exactement le signal que
+ * la reco utilise pour te proposer plus de vidéos qui te ressemblent.
+ */
+router.get('/interests', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { data: likes } = await supabaseAdmin
+      .from('video_likes').select('video_id').eq('user_id', userId).limit(500);
+    const ids = (likes || []).map((l) => l.video_id);
+    if (ids.length === 0) {
+      return res.json({ success: true, totalLikes: 0, interests: [], creators: [] });
+    }
+
+    const { data: vids } = await supabaseAdmin
+      .from('videos')
+      .select('id, tags, creator_id, creator:users!creator_id(id, username, avatar_url)')
+      .in('id', ids);
+
+    const tagCount = {};
+    const creatorCount = {};
+    const creatorInfo = {};
+    for (const v of vids || []) {
+      for (const t of (v.tags || [])) {
+        const k = String(t).toLowerCase().replace(/^#/, '').trim();
+        if (k) tagCount[k] = (tagCount[k] || 0) + 1;
+      }
+      if (v.creator_id) {
+        creatorCount[v.creator_id] = (creatorCount[v.creator_id] || 0) + 1;
+        creatorInfo[v.creator_id] = v.creator;
+      }
+    }
+
+    const interests = Object.entries(tagCount)
+      .sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .map(([tag, count]) => ({ tag, count }));
+    const creators = Object.entries(creatorCount)
+      .sort((a, b) => b[1] - a[1]).slice(0, 10)
+      .map(([id, count]) => ({
+        id, count,
+        username: creatorInfo[id]?.username || 'Créateur',
+        avatar_url: creatorInfo[id]?.avatar_url || null,
+      }));
+
+    return res.json({ success: true, totalLikes: ids.length, interests, creators });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
