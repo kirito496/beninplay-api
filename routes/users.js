@@ -407,4 +407,28 @@ router.post('/avatar', requireAuth, avatarUpload.single('avatar'), async (req, r
   }
 });
 
+/**
+ * POST /api/users/sticker — téléverse une image à poser comme sticker sur une
+ * vidéo (façon Snapchat). Renvoie l'URL publique (stockée dans l'overlay).
+ */
+router.post('/sticker', requireAuth, avatarUpload.single('sticker'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ success: false, message: 'Aucune image reçue' });
+    const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'videos';
+    const ext = (file.mimetype && file.mimetype.includes('png')) ? 'png' : 'jpg';
+    const path = `stickers/${req.user.id}_${Date.now()}.${ext}`;
+
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(bucket)
+      .upload(path, file.buffer, { contentType: file.mimetype || 'image/png', upsert: true });
+    if (upErr) return res.status(500).json({ success: false, message: upErr.message });
+
+    const { data: pub } = supabaseAdmin.storage.from(bucket).getPublicUrl(path);
+    return res.json({ success: true, url: pub && pub.publicUrl });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
